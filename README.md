@@ -50,6 +50,8 @@ in 4 seconds, cold. See [ADR-002](docs/architecture/data-sources.md).
 
 | | |
 |---|---|
+| [`docs/design/BRIEF.md`](docs/design/BRIEF.md) | **Designer brief** — product, stack, animation spec, colour direction |
+| [`.specify/memory/constitution.md`](.specify/memory/constitution.md) | Project constitution — outranks everything else |
 | [`docs/research/findings.md`](docs/research/findings.md) | The research digest — brief decoded, verified capabilities, traps, open questions |
 | [`docs/architecture/progressive-map.md`](docs/architecture/progressive-map.md) | ADR-001 — the map *is* the response |
 | [`docs/architecture/data-sources.md`](docs/architecture/data-sources.md) | ADR-002 — Overture on S3, queried in place |

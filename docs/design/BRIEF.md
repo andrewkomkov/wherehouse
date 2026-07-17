@@ -112,6 +112,69 @@ Note the answers *are* map layers, so "chat history" is partly a **map state his
 scrolling back could mean the map rewinds. That might be a great idea or a terrible one.
 Your call.
 
+## Colour: the sponsors, and the trap
+
+The jury is ClickHouse and Trigger.dev engineers. Looking native to their world is worth
+something. But their palettes carry a genuine trap — read this before picking anything.
+
+### The official values
+
+**ClickHouse** — from their design system, [clickhouse.design/brand/color](https://clickhouse.design/brand/color)
+(official, read from their own design tokens):
+
+| | Hex | Token |
+|---|---|---|
+| Primary yellow | **`#FAFF69`** | `primary.300` |
+| Neutral black | **`#151515`** | `neutral.900` |
+| Teal accent | `#00FFD4` | |
+| Violet accent | `#AA00FF` | |
+| Info / Success / Warning / Danger | `#135BE6` / `#2AC656` / `#FF9416` / `#FF2323` | |
+
+Their own guidance, verbatim: *"The yellow is most prominent in our marketing […] where it
+should be used as the dominant colour"* but *"In our product, it should be used primarily
+as an accent."* Their **product is black-dominant with yellow accents**. Fonts: Söhne
+(marketing), Inter (product). Note their logos ship **monochrome**, not yellow.
+
+**Trigger.dev** — no published colour guideline exists; their brand page ships logos only.
+These come from their **open-source stylesheet** (first-party, but not a guideline):
+
+| | Hex | Note |
+|---|---|---|
+| Accent green | **`#A8FF53`** | `--color-primary` in their webapp |
+| Signature background | **`#121317`** | `charcoal-900` |
+| Surfaces | `#2c3034` / `#272a2e` | secondary / tertiary |
+| Link | `#826dff` | lavender |
+| Logo gradient | `#41FF54` → `#E7FF52` | **different green from the accent** — flagged, not papered over |
+
+Their stylesheet says outright: *"Defaults below are the original dark theme"* — light is a
+scoped override. **Dark-first, explicitly.**
+
+### The trap
+
+**`#FAFF69` and `#A8FF53` are nearly the same colour.** A yellow-green and a green-yellow,
+both fully saturated, both screaming for attention. Put them side by side and they read as
+a mistake rather than as two brands. Worse: that hue family is exactly where a
+"high value" choropleth ramp wants to end — so the sponsors' accents will fight our most
+important data layer.
+
+### The recommendation (argue with it)
+
+1. **Go dark.** Both sponsors are dark-first, dark is where data-on-map reads best, and it
+   makes bright data pop. This also resolves the light/dark question from earlier.
+   `#151515` / `#121317` are almost the same black — pick one and move on.
+2. **Do not build the data layers from brand colours.** The choropleth, isochrones and
+   category dots need a palette chosen for legibility and colour-blind safety — read the
+   `dataviz` skill before choosing. Brand colours are chrome, not data.
+3. **Spend the yellow-green in exactly one place, where it means something.** The obvious
+   candidate: **the #1 top pick**. `#FAFF69` on the winning pin is a nod to ClickHouse *and*
+   the single most important pixel on the screen. Using it for buttons and hovers and
+   borders spends it into meaninglessness.
+4. **Don't use both accents.** Pick one. Using ClickHouse yellow and Trigger green together
+   looks like a sponsor slide, not a product.
+
+This is a recommendation, not a spec. If you have a better idea — especially one that makes
+us look like we belong in their ecosystem without cosplaying it — take it.
+
 ## The layers you're designing
 
 1. **Basemap** — Protomaps/MapLibre vector tiles. Dark or light is your call; we have

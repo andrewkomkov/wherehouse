@@ -14,6 +14,33 @@ The repo is currently **research + scaffolding**. No application code yet — re
 `docs/research/findings.md` first, it is the distilled output of five research agents
 plus live verification against our own ClickHouse service.
 
+## Spec-Driven Development — MANDATORY
+
+This project uses [spec-kit](https://github.com/github/spec-kit) (v0.12.18). **Non-trivial
+features go through the spec-driven cycle — this is not optional.** Artifacts live in
+`specs/`.
+
+1. `/speckit-constitution` — project principles (`.specify/memory/constitution.md`)
+2. `/speckit-specify` — the spec
+3. `/speckit-plan` — implementation plan
+4. `/speckit-tasks` — task breakdown
+5. `/speckit-implement` — build it
+
+Optional, for quality: `/speckit-clarify` (before `/speckit-plan`), `/speckit-analyze`
+(after `/speckit-tasks`, before `/speckit-implement`), `/speckit-checklist` (after
+`/speckit-plan`).
+
+**[`.specify/memory/constitution.md`](.specify/memory/constitution.md) outranks this file.**
+Read it before planning anything. If the two disagree, the constitution wins and this file
+gets fixed. Its six principles are distilled from what actually went wrong on day 1 —
+notably *"claims are verified against the live system, not the docs"* and *"prove the
+riskiest path first"*.
+
+**Proportionality:** this is a 6-day hackathon. Spec-driven means *think before you type*,
+not *generate paperwork*. Trivial changes go direct. The test: *would getting this wrong
+cost more than an hour?* A spec that takes longer to write than the feature takes to build
+violates constitution principle VI.
+
 ## Non-negotiable constraints (from the hackathon rules)
 
 These override normal engineering judgement — they are scoring criteria.
