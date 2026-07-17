@@ -24,6 +24,16 @@
 --
 -- Built by infra/valhalla.sh (download PBF -> build graph -> batch isochrones -> load here).
 -- ClickHouse Cloud 26.4.1.2029, eu-west-1.
+--
+-- WHAT A ROW IN HERE IS WORTH: loading is verified-or-rolled-back. infra/valhalla.sh's
+-- `load` runs the full check suite against the partition it has just written and DROPS that
+-- partition if any check fails, so a failed load leaves no data rather than bad data.
+--
+-- That is not theoretical tidiness. The first Berlin load was snapped garbage; the checks
+-- correctly rejected it — and the rows stayed queryable anyway, because verification was a
+-- separate step. A reviewer read 47,460 physically impossible contours out of this table
+-- during that window. "A check failed somewhere in a log" is worth nothing to someone
+-- reading the table. Presence of a partition here now means it passed.
 
 CREATE DATABASE IF NOT EXISTS geo;
 

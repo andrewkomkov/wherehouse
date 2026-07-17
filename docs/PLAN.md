@@ -232,6 +232,33 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
   tiles) driven by a monthly Trigger.dev cron** instead of a laptop script. Answers the
   *"would this work in production?"* half of Technical Implementation (20%). Only after the
   skeleton — see decision note.
+- ✅ **Isochrones precomputed — all three cities, 20,724 origins** (`infra/valhalla.sh`,
+  `geo.isochrones` + `geo.isochrone_cells`). Valhalla ran as a build-time tool and the
+  container is down. **Not yet surfaced in the product** — the data exists, the layer does not.
+
+  **What this cost, and it is the day's best lesson.** The first Berlin load was garbage:
+  4.2 km reached in a five-minute walk. Cause was measured, not guessed — Valhalla's
+  `search_cutoff` defaults to **35 km**, so a res-9 centroid sitting in a lake, a park or a
+  rail yard does not fail; it silently snaps to a road up to kilometres away and returns *that
+  road's* catchment under our cell id. 1,644 Berlin origins had contours centred >1.5 km from
+  themselves. Fix: `search_cutoff: 150` — chosen from geometry (a res-9 cell is ~180 m across),
+  not taste. Price: ~38% of candidate cells are skipped rather than fabricated.
+
+  **Three things about the verification, which is the part worth stealing:**
+  1. *The check was not broken — the pipeline was.* It failed correctly and exited non-zero, but
+     `load` and `verify` were separate subcommands, so the condemned rows sat in the table,
+     queryable, while the cause was investigated. A reviewer read them and saw 47,460 contours
+     of garbage with nothing to say they had been rejected. **A failed load must leave no data,
+     not bad data.** Verify is now part of load and a failure drops the partition it just wrote.
+  2. *The old check only inspected 15 minutes* — and the worst contour was the 5-minute one. It
+     caught the bug by luck. A check that inspects a third of the data is a third of a check.
+  3. *It is proven to discriminate*: the same sample under `auto` costing gives p99.9 = 14,378 m
+     against pedestrian's 1,290 m, and the pre-fix data fails every check. **A check that has
+     never failed is decoration.**
+
+  Measured maxima (crow-flies, 5/10/15 min): berlin 597/1259/**2204**, amsterdam 602/1068/1861,
+  belgrade 368/949/1325. The Berlin 15-min outlier is a **ferry-served origin** — pedestrians
+  board ferries; it is legitimate and covered by the hard ceiling with no special case.
 - **Progressive choreography** — the wave sequence from ADR-001, wired for real.
 - **Design integration** — the comp landed 20 July (claude.ai/design, `WhereHouse.dc.html`).
   Map-dominant with a floating instrument rail; dark `#0a0c0f`; IBM Plex; teal `#6ff0e0`

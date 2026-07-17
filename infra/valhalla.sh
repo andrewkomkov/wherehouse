@@ -496,6 +496,30 @@ load() {
 
     ok "loaded: $(ch "SELECT count() FROM geo.isochrones WHERE city='$city'") contours, \
 $(ch "SELECT count() FROM geo.isochrone_cells WHERE city='$city'") reachable-cell rows"
+
+    ###################################################################################
+    # VERIFY, AND ROLL BACK IF IT FAILS. This is not belt-and-braces — it closes a hole
+    # that actually bit us.
+    #
+    # The first Berlin load produced snapped, physically impossible isochrones. verify()
+    # correctly FAILED it and exited non-zero. But `load` and `verify` were separate
+    # subcommands, so the condemned rows just... stayed in the table, queryable, while the
+    # cause was investigated. A reviewer read geo.isochrone_cells during that window and
+    # found 47,460 contours of garbage — with nothing in the table to say a check had
+    # already rejected them.
+    #
+    # "The check failed" is worth nothing to someone reading the table. A failed load must
+    # leave NO DATA, not bad data. So verification is part of loading, and a failure drops
+    # the partition it just wrote. Loud, and empty, beats quiet and wrong.
+    ###################################################################################
+    if ! verify "$city"; then
+        warn "verification FAILED for '$city' — dropping the partition just loaded."
+        warn "Bad isochrones must never be readable: an empty table is an obvious outage,"
+        warn "a plausible-but-wrong one is a lie that survives until someone measures it."
+        ch "ALTER TABLE geo.isochrones      DROP PARTITION '$city'" >/dev/null
+        ch "ALTER TABLE geo.isochrone_cells DROP PARTITION '$city'" >/dev/null
+        die "load rolled back for '$city' — table left clean, nothing to un-believe"
+    fi
 }
 
 # Verify like a sceptic, not like an author.
@@ -580,54 +604,51 @@ verify() {
             GROUP BY origin_h3_9
         )"
 
-    # 5. THE REACH CEILING — the check that proves these are ROUTED, not buffered.
-    #    Measured on this graph, a pedestrian route runs ~5.0 km/h (5.00 / 4.96 / 4.98 on
-    #    three pure-footway Berlin routes), so 15 min is ~1.25 km of PATH and the crow-flies
-    #    distance must stay under it (path >= crow). 1.6 km leaves headroom for the res-9
-    #    quantisation and the 20 m generalize.
+    # 5. THE REACH CEILING, PER CONTOUR — and note the words "per contour".
     #
-    #    PROVEN TO DISCRIMINATE, which is the only reason it is worth running — the same
-    #    sample recomputed with 'auto' costing gives p99.9 = 14,378 m against pedestrian's
-    #    1,290 m. A check that cannot fail is decoration; this one fails by 11x on the most
-    #    likely real mistake.
-    ch "SELECT
-          minutes,
-          round(max(geoDistance(
-            h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
-            h3ToGeo(reachable_h3_9).2, h3ToGeo(reachable_h3_9).1)), 0) AS max_crow_m,
-          round(avg(geoDistance(
-            h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
-            h3ToGeo(reachable_h3_9).2, h3ToGeo(reachable_h3_9).1)), 0) AS avg_crow_m
-        FROM geo.isochrone_cells WHERE city = '$city'
-        GROUP BY minutes ORDER BY minutes"
-    #    The ceiling is a DISTRIBUTION check, not an absolute one, and the reason is a real
-    #    finding rather than a fudge to make the check green.
+    #    This check was originally written for minutes=15 ONLY, and that was a real hole:
+    #    the pre-fix data's WORST contour was the 5-minute one (max 4,250 m, 6.6% of cells
+    #    over a generous limit) and the 15-min-only check never looked at it. It caught the
+    #    bug by luck, because the same cause happened to break 15 min too. A check that only
+    #    inspects a third of the data is a third of a check. Fixed after review.
     #
-    #    4 Berlin origins (7 cells of 247,036 = 0.0028%) legitimately reach 2.2 km in 15
-    #    minutes. They are not broken: they sit at a ferry terminal, and Valhalla's
-    #    pedestrian graph includes the crossing. Established from the engine, not assumed —
-    #    /route from (52.4368, 13.16737) reports 2.36 km in 874 s (9.7 km/h, impossible on
-    #    foot), and /trace_attributes over that route's own shape returns:
-    #        use=ferry, 2.10 km, names=['F10 Alt Kladow -> S Wannsee']
-    #    (Those names are quoted from the engine's response. No place name here was typed
-    #    from anyone's sense of Berlin geography — see constitution II.)
-    #    Note use_ferry=0 does NOT suppress it: identical geometry, verified.
+    #    Limits are 800 / 1600 / 2400 m against a measured ~5.0 km/h walk (417 / 833 /
+    #    1250 m of path), i.e. ~60-90% slack over crow-flies physics. Deliberately generous:
+    #    this check hunts gross errors (snapping, 'auto' costing, a lat/lon swap), and the
+    #    tighter p99.9 check below is what polices the distribution.
     #
-    #    So an absolute ceiling would be false. A percentile ceiling still catches every
-    #    systemic failure this check exists for — 'auto' costing, a lat/lon swap, a leaked
-    #    contour — because those move the whole distribution, not four cells at a jetty.
-    #    Measured now: p50 661 m, p95 994 m, p99.9 1,223 m, max 2,207 m.
-    check "p99.9 of 15-min crow reach is within the 1.6 km walking ceiling" "
-        SELECT quantile(0.999)(geoDistance(
-                 h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
-                 h3ToGeo(reachable_h3_9).2, h3ToGeo(reachable_h3_9).1)) <= 1600
-        FROM geo.isochrone_cells WHERE city = '$city' AND minutes = 15"
-    check "cells beyond the walking ceiling are a rounding error (<0.05%, the ferry)" "
+    #    The 2400 m at 15 min also covers the one legitimate outlier — a ferry-served origin
+    #    reaching 2,207 m (see the note under check 4). So there is no special case here and
+    #    no percentile dodge: it is a hard max, on every contour, and it still passes.
+    #
+    #    Measured maxima, all three cities: berlin 599/1261/2207, amsterdam 602/1068/1861,
+    #    belgrade 368/949/1325. Pre-fix Berlin: 4250/4383/4383 -> fails on all three.
+    check "no contour exceeds its hard reach ceiling (800/1600/2400 m, per contour)" "
         SELECT countIf(geoDistance(
                  h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
-                 h3ToGeo(reachable_h3_9).2, h3ToGeo(reachable_h3_9).1) > 1600)
-               < count() * 0.0005
-        FROM geo.isochrone_cells WHERE city = '$city' AND minutes = 15"
+                 h3ToGeo(reachable_h3_9).2, h3ToGeo(reachable_h3_9).1)
+               > multiIf(minutes = 5, 800., minutes = 10, 1600., 2400.)) = 0
+        FROM geo.isochrone_cells WHERE city = '$city'"
+
+    #    And the distribution, at 1.5x walking physics per contour (625/1250/1875 m). This
+    #    catches a shift that stays under the hard ceiling.
+    #    Measured p99.9 now: 368 / 847 / 1221. Pre-fix: 3829 / 3609 / 3347 -> all fail.
+    check "p99.9 reach is within 1.5x walking physics, per contour" "
+        SELECT countIf(p999 > lim) = 0
+        FROM (
+            SELECT minutes,
+                   quantile(0.999)(geoDistance(
+                     h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
+                     h3ToGeo(reachable_h3_9).2, h3ToGeo(reachable_h3_9).1)) AS p999,
+                   multiIf(minutes = 5, 625., minutes = 10, 1250., 1875.) AS lim
+            FROM geo.isochrone_cells WHERE city = '$city'
+            GROUP BY minutes
+        )"
+
+    #    PROVEN TO DISCRIMINATE, which is the only reason these are worth running: the same
+    #    sample recomputed with 'auto' costing gives p99.9 = 14,378 m against pedestrian's
+    #    1,290 m, and the pre-fix snapped data fails every check in this function. A check
+    #    that has never failed is decoration.
 
     # 6. ROUTING BEATS A BUFFER. If these were circles we could have skipped Valhalla
     #    entirely. A real street network is anisotropic: the ratio of reached area to the
@@ -640,7 +661,11 @@ verify() {
               FROM geo.isochrone_cells WHERE city = '$city' GROUP BY minutes, origin_h3_9)
         GROUP BY minutes ORDER BY minutes"
 
-    [[ $fails -eq 0 ]] || die "$fails verification check(s) FAILED for $city"
+    # return, do not die: load() needs to catch this and roll the partition back.
+    if [[ $fails -ne 0 ]]; then
+        warn "$fails verification check(s) FAILED for $city"
+        return 1
+    fi
     ok "$city: all checks passed"
 }
 
@@ -742,11 +767,16 @@ case "$CMD" in
     build)  for c in "${CITIES[@]}"; do build "$c"; done; down ;;
     batch)  for c in "${CITIES[@]}"; do build "$c"; batch "$c"; done; down ;;
     load)   for c in "${CITIES[@]}"; do load "$c"; done ;;
-    verify) for c in "${CITIES[@]}"; do verify "$c"; spotcheck "$c"; done ;;
+    verify) for c in "${CITIES[@]}"; do
+                verify "$c" || die "verification FAILED for $c — the loaded data is not trustworthy"
+                spotcheck "$c"
+            done ;;
     down)   down; ok "container removed" ;;
     all)
         for c in "${CITIES[@]}"; do
-            build "$c"; batch "$c"; load "$c"; verify "$c"; spotcheck "$c"
+            # load() verifies and rolls the partition back on failure — no separate
+            # verify step here, and no window where rejected data is readable.
+            build "$c"; batch "$c"; load "$c"; spotcheck "$c"
         done
         # The container is a build-time tool. Nothing is left listening.
         down; ok "container removed"
