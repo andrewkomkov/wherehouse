@@ -54,6 +54,40 @@ api() {
 
 jq_r() { python3 -c "import sys,json;d=json.load(sys.stdin);print(eval('d'+sys.argv[1]))" "$1" 2>/dev/null || true; }
 
+# --- sql ---------------------------------------------------------------------
+
+# One SQL statement over the HTTP interface, as `default`. Fails loudly.
+ch() {
+    curl -sS --fail-with-body --max-time 300 \
+        --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "$1"
+}
+
+# Apply a .sql file statement by statement.
+#
+# The HTTP interface takes exactly one statement per request — there is no `multiquery`
+# setting on 26.4 (Code: 115), and posting a whole .sql file gets Code: 62. So split the
+# file and send the statements one at a time.
+#
+# Strip comments BEFORE splitting, not after: our own schema prose contains semicolons
+# ("+7.2%; Kontur's Serbian extent…"), and a naive split on ';' cuts the file mid-sentence
+# and posts the fragment as SQL. Comments first, then split.
+apply_sql_file() {
+    local file="$1" stmt
+    while IFS= read -r stmt; do
+        [[ -z "$stmt" ]] && continue
+        ch "$stmt" >/dev/null
+    done < <(python3 - "$file" <<'PY'
+import re, sys
+sql = open(sys.argv[1]).read()
+sql = re.sub(r"--[^\n]*", "", sql)                 # line comments (may contain ';')
+for stmt in sql.split(";"):
+    stmt = " ".join(stmt.split())
+    if stmt:
+        print(stmt)
+PY
+    )
+}
+
 # Wait until a resource reports the desired state.
 # wait_state <describe-cmd> <python-path-to-state> <target> <label>
 wait_state() {

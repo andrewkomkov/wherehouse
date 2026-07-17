@@ -40,6 +40,25 @@ evidence. State fields lie; verify with a canary.
 When something is unverified, it is labelled unverified — in the spec, in the ADR, and to
 the user. Never present a hypothesis in the register of a fact.
 
+**This applies to our own prose exactly as it applies to code.** A sentence in a spec is a
+claim; "it looks right" is not a verification. On day 3 the agent was corrected for naming
+three Berlin districts it could not know — and the same defect was then found in the spec
+that corrected it: *"Mariendorf, Hellersdorf, Köpenick"* had been eyeballed from coordinates
+and written down as measured fact. All three were wrong (truth: Lichtenrade, Biesdorf,
+Mahlsdorf). It survived because the reference SQL returned no names, so nothing we ran could
+contradict it.
+
+Two rules follow, and they are the expensive part of this principle:
+
+1. **A number is not evidence for the words next to it.** Verified coordinates do not verify
+   the place name attached to them. Check the claim that was actually made.
+2. **An unfalsifiable claim is the dangerous kind.** If no command you run could prove a
+   statement wrong, you have not verified it — you have decorated it. Either find the command
+   (here: Overture divisions + `pointInPolygon`) or label it a guess.
+
+A plausible, checkable, wrong detail is worse than no detail: it is exactly what a domain
+expert on the jury checks first, and it discredits the true things around it.
+
 ### III. Prove the riskiest path first
 
 Build the thinnest end-to-end slice before building anything good. `chat.agent()` reached
@@ -131,4 +150,8 @@ Reviews verify compliance. Complexity must be justified against Principle VI.
 Runtime guidance for agents lives in `CLAUDE.md`; where `CLAUDE.md` and this constitution
 disagree, this file wins and `CLAUDE.md` gets fixed.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-17
+**Version**: 1.1.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-19
+
+*1.1.0 — Principle II extended to our own prose, after a spec was found asserting three
+invented district names as measured fact, hours after the agent was corrected for the
+identical mistake.*

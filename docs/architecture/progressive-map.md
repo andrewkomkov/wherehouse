@@ -19,8 +19,21 @@
 > the model while the GeoJSON reaches only the UI, and typed `data-map` parts arrive in
 > `message.parts`.
 >
-> **Assumed still** — the seven-wave choreography below (only one wave has ever run), and
-> that the map survives a refresh (persistence is not yet exercised).
+> **Also proven, 19 July** — the ID-reference fix below, end to end in the product. The
+> browser fetched the 549 KiB choropleth straight from ClickHouse as the readonly `site` user
+> (INSERT 770 ms / GET 550 ms, byte-identical), and a 781 KiB competitor layer went the same
+> way on a real question. The 1 MiB cap is retired as a risk: an over-budget layer never
+> touches the stream at all.
+>
+> **Refuted, 19 July — "the map survives a page refresh".** It does not. `useChat` mints a new
+> `chatId` per mount, so a reload starts a fresh session and the map is empty. The SDK does
+> offer hydration (`sessions` + `onSessionChange` + `reconnectToStream`), but that resumes a
+> *live stream*; a finished answer has no stream, so restoring a completed map means replaying
+> persisted parts. Descoped on day 3 — it moves no rubric criterion. This is the second claim
+> in this ADR that survived only until it was executed.
+>
+> **Assumed still** — the seven-wave choreography below. Three waves have now run
+> (competitors → choropleth → picks); isochrones and the viewport fly-in have not.
 >
 > **Refuted** — "the full payload goes to the UI" without qualification. See the 1 MiB cap
 > section; it is the one thing in this ADR that day 2 broke.
@@ -131,8 +144,21 @@ return { rowCount: rows.length };
 
 This turns the constraint into an asset: on stage the **browser talks to ClickHouse
 directly**, which strengthens the 25% "use of ClickHouse" criterion rather than working
-around it. Deferred to day 3 — the skeleton's payloads are kilobytes and the gate did not
-need it.
+around it.
+
+**Built and proven on day 3.** The store is `web.layers` (`db/clickhouse/004_layers_schema.sql`,
+TTL 1 h). Two findings from building it:
+
+- **It needs no access DDL at all.** `GRANT SELECT ON web.*` is a wildcard that already covers
+  a new table — verified by canary. That matters beyond convenience: access DDL is what
+  permanently wedged `p_html`/`web_html`/`web_html2`, and a design that never runs it cannot
+  step on that mine.
+- **The decision is made on measured bytes, not row counts** (`web/src/trigger/layers.ts`,
+  budget 256 KiB = 4x margin). A row-count heuristic is a guess about average feature size and
+  a category with long names breaks it silently.
+
+The choropleth (549 KiB) takes the handle path on **every** question, so the mitigation runs on
+the demo's own happy path and cannot rot unnoticed.
 
 ## Typing trap: do not intersect with `UIDataTypes`
 

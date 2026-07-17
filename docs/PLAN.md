@@ -111,7 +111,49 @@ this is day 2 and not day 5.
 
 ---
 
-## Day 3 — 19 July · the real answer
+## Day 3 — 19 July · the real answer ✅ gate passed
+
+**"Where should I open a bakery in Berlin?" returns a real, defensible map.** Three layers —
+1,460 competitor dots (430 ms), a 2,260-cell GAP choropleth (700 ms), three ranked pins —
+assembled progressively, driven by ClickHouse, streamed through `chat.agent()`.
+
+**The 1 MiB cap is retired.** The handle path is live: the browser reads the 549 KiB
+choropleth straight from ClickHouse as the readonly `site` user. *"Show me all food and
+drink"* — 6,664 points, 781 KiB, a guaranteed `ChatChunkTooLargeError` yesterday — now renders.
+An over-budget layer never touches the stream.
+
+**The score is defensible now, and it wasn't before.** The inherited "3 bakeries = saturated"
+was measured against reality and is **wrong**: ring supply runs median 1 / p75 4 / **max 64**,
+so the constant sat at the p75 and would have flattened a third of Berlin into "fully
+saturated", degenerating the answer into "wherever the most people live". Replaced with p95
+scaling on both terms, derived per query. Top-3: Lichtenrade, Biesdorf, Mahlsdorf — dense
+residential, zero bakeries in the ring, and notably *not* the commercial centre.
+
+**What day 3 broke:**
+1. **The model invented place names — and so did we.** First live run: the map was right and
+   the sentence put all three picks in *Spandau*, the wrong side of the city. The tools return
+   no place names, so it made them up. The prompt now forbids naming districts.
+
+   Then the same bug was found **in our own spec**: the "Mariendorf / Hellersdorf / Köpenick"
+   baseline was eyeballed from coordinates and **all three were wrong**. Resolved properly
+   against Overture divisions: **Lichtenrade, Biesdorf, Mahlsdorf**. (Day 2's exploration had
+   Lichtenrade right; day 3 "corrected" it to a guess.) Constitution II applies to prose in a
+   spec exactly as it applies to a claim in code.
+
+   **Fix, proven feasible 19 July, day-4 candidate:** Overture `theme=divisions/type=division_area`.
+   Cloud 26.4 reads it natively as `Geometry` (no `readWKB` — the column is already a Variant;
+   use `variantElement(geometry,'Polygon'|'MultiPolygon')`). `subtype='macrohood'` is the
+   Ortsteil (Lichtenrade), `subtype='locality'` the Bezirk (Tempelhof-Schöneberg). Resolving a
+   point takes a bbox prefilter + `pointInPolygon`, sub-second. Precompute `h3_8 → name` into a
+   small table and `rankSites` joins on equality — no runtime geometry. Then the naming ban can
+   be lifted honestly, and "Lichtenrade" is a far better demo line than "an underserved area".
+2. **The map does not survive a page reload** — ADR-001 assumed it did; it doesn't. Cut, with
+   reasons, in the spec's Out of Scope.
+3. `h3ToGeo` and `h3ToGeoBoundary` are **lat-first** like `geoToH3`. A swapped bbox returns
+   zero rows with **no error**. Now in `CLAUDE.md`.
+
+<details>
+<summary>Original day-3 plan, for the record</summary>
 
 Now spec it — `/speckit-specify` the site-selection answer flow, with what day 2 taught us.
 
@@ -140,6 +182,8 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
 - Model sees `{ rowCount }` only; GeoJSON goes out-of-band (ADR-001)
 
 **Exit gate:** "where should I open a bakery in Berlin?" returns a real, defensible map.
+
+</details>
 
 ---
 
@@ -321,7 +365,9 @@ same container, used for the *batch*, is a different question with a different a
 |---|---|---|
 | ~~`chat.agent()` doesn't behave as documented~~ | ~~critical~~ → **RETIRED 18 Jul** | skeleton ran it end to end; behaves as documented |
 | ~~Progressive in-place update doesn't work~~ | ~~high~~ → **RETIRED 18 Jul** | proven live: `parts=1` across two writes to one id, content changed |
-| **1 MiB per-record cap kills a wide layer mid-demo** | **high** — new, found day 2 | already exceeded by Berlin food & drink (1.27 MiB). ID-reference via ClickHouse, day 3, before any wide layer ships |
+| ~~**1 MiB per-record cap kills a wide layer mid-demo**~~ | ~~high~~ → **RETIRED 19 Jul** | handle path live: an over-budget layer never touches the stream. Proven on the 549 KiB choropleth and a 781 KiB competitor layer, both fetched by the browser straight from ClickHouse |
+| **The model states things it cannot know** | **medium** — new, found day 3 | it placed all three Berlin picks in "Spandau" on the first live run. Tools return no place names; the prompt now forbids naming districts. A place name in the answer = the guard regressed |
+| **DeepSeek balance is $4.87** | medium | a day of iteration, not a week. `check-env.sh` reports it; drop `ANTHROPIC_BASE_URL` to fall back to real Anthropic |
 | Designer doesn't deliver in time | medium | brief is out day 1; ship functional-but-plain, style later |
 | Cloud reaches 26.6 (or doesn't) | low | assume it doesn't; nothing depends on it |
 | CDC slot breaks again | low | `resync` is a one-liner; never touch Postgres `size` |
