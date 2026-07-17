@@ -106,8 +106,22 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
   (~0.1 km², ~180 m across — imperceptible on a map), look up the precomputed polygon in
   ClickHouse, return it in sub-millisecond. See the decision note below.
 
-  Scale: Berlin ≈ 8.5k cells at res 9; all three cities ≈ 15–25k cells × 3 bands ≈
-  45–75k isochrones ≈ **1–2 h of one-off offline compute**.
+  **Measured on this machine (17 July), not estimated:**
+
+  | | |
+  |---|---|
+  | Berlin PBF (Geofabrik) | 94 MB |
+  | Berlin `valhalla_tiles.tar` | **151 MB** (three cities ≈ 400–500 MB) |
+  | Graph build | 453 s (7.5 min, `server_threads=1`) |
+  | **One 5/10/15-min pedestrian isochrone** | **63 ms**, 1520 bytes |
+
+  ⇒ Berlin ≈ 8.5k cells at res 9 × 63 ms ≈ **9 minutes**. All three cities ≈ 25k cells ≈
+  **26 minutes**, single-threaded, on a laptop. Total stored GeoJSON ≈ **38 MB** — nothing
+  for ClickHouse.
+
+  This is what settles the runtime-Valhalla question: not cost or difficulty, but that
+  **there is nothing to compute at runtime**. Everything Valhalla can answer for our three
+  cities fits in half an hour of offline compute and 38 MB.
 - Optional 30-min insurance: a hosted isochrone API (Geoapify — 3k credits/day, no credit
   card; or OpenRouteService — 2.5k/day) behind a "live point" path, for clicks outside our
   three cities.
@@ -169,10 +183,12 @@ precomputed grid.
 **Everything technical clears.** Cloudflare Containers went GA 2026-04-13; we have Workers
 Paid. Image size is **not** a constraint: image size = instance disk, and `standard-1`
 gives 8 GB disk / 4 GiB RAM. Measured: the Valhalla base image is 228 MB and **Berlin's
-built tiles are 538 MB** — ~800 MB total, fits with room to spare. `linux/amd64` only, but
-the gis-ops image publishes both arches. POST/JSON passes through the Worker verbatim; no
-response size cap. Cost ≈ **$1/day**. One container per city is idiomatic (Durable Objects
-are addressed by name, `idFromName("berlin")`) — but it solves a problem we don't have.
+tiles are 151 MB** — under 400 MB total, trivially fits. (An earlier reading of 538 MB was
+mid-build intermediate data; Valhalla's cleanup stage collapses it. Don't trust a size
+taken before the build finishes.) `linux/amd64` only, but the gis-ops image publishes both
+arches. POST/JSON passes through the Worker verbatim; no response size cap. Cost ≈
+**$1/day**. One container per city is idiomatic (Durable Objects are addressed by name,
+`idFromName("berlin")`) — but it solves a problem we don't have.
 
 **What doesn't clear:**
 - **Cold start for large images is unpublished.** Docs say "often 1–3s… dependent on image
@@ -192,6 +208,27 @@ are addressed by name, `idFromName("berlin")`) — but it solves a problem we do
    ClickHouse in sub-milliseconds. The user still gets "click anywhere, get a catchment".
    The difference is that **ClickHouse does the work on stage**, and Valhalla is relegated
    to a build-time tool, which is what it's actually good at.
+3. **And then the measurements killed it outright:** 63 ms per isochrone means the entire
+   answer space for three cities is ~26 minutes of offline compute and 38 MB of GeoJSON.
+   There is nothing left for a runtime service to do. A container would exist purely to
+   recompute, on demand and slowly, an answer we already have.
+
+### Refresh cadence — don't overbuild this
+
+Roads do not change daily; **isochrones do not need a nightly job.** A one-off backfill now,
+then monthly (or incremental, for new cells only) is honest. Rebuilding 25k isochrones every
+night to produce a zero delta is theatre.
+
+What *does* change daily is **POIs** — competitors open and close. That's the recurring job
+worth having, and it needs no Valhalla at all: refresh from Overture → rescore → alert
+("a bakery opened 200 m from your site #3, score −12", ADR-004). That is Trigger.dev's
+second meaningful role, and it's genuinely daily.
+
+Note the tension to avoid: *"Trigger.dev triggers Valhalla"* sounds good but requires
+Valhalla to be reachable — i.e. hosted — which is the thing we just cut. Either run the
+backfill locally (chosen), or run Valhalla **inside** a Trigger.dev task pulling tiles from
+R2 (cold start is irrelevant to a batch job — but whether their runtime can host a C++
+binary + 151 MB tile store is **unverified**, and verifying it costs a day we don't have).
 
 Result: no cold start, no image question, no ephemeral disk, no demo-day failure mode, and
 a better story. Runtime Valhalla is the right call for the version of this project that has
