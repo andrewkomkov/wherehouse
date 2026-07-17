@@ -428,6 +428,33 @@ export function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature, storeVersion]);
 
+  /**
+   * The median GAP over the opportunity choropleth's own cells — one number on how underserved the
+   * city is for this trade. Computed from the FeatureCollection already fetched and painted
+   * (store.current.opportunity), so it costs no extra query. `gap` is ClickHouse's neutral score,
+   * the same number the cells are painted with. Absent until the surface lands.
+   */
+  const medianOpportunity = useMemo(() => {
+    void storeVersion;
+    const fc = store.current.opportunity;
+    if (!fc) return undefined;
+    // Score each cell under the CURRENT weights, exactly as the choropleth is painted
+    // (gapDisplay == the fill's own expression). At neutral this is ClickHouse's gap; off neutral it
+    // tracks the re-weighted surface, so the tile never disagrees with the cells it summarises.
+    const gaps = (fc.features as GeoJSON.Feature<GeoJSON.Geometry, CellProps>[])
+      .map((f) => {
+        const p = f.properties;
+        if (!p || typeof p.gap !== "number") return undefined;
+        return scale ? gapDisplay(p, scale, weights) : p.gap;
+      })
+      .filter((g): g is number => typeof g === "number")
+      .sort((a, b) => a - b);
+    if (!gaps.length) return undefined;
+    const mid = gaps.length >> 1;
+    return gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature, storeVersion, scale, weights]);
+
   // ---- saved sites (feature 003) --------------------------------------------------------
 
   /**
@@ -815,6 +842,34 @@ export function Chat() {
   const catchmentShown = latest.has("catchment") && visible.catchment;
   const notMeasured = latest.get("opportunity")?.notMeasured;
 
+  // ---- market at a glance (feature 006) --------------------------------------------------
+  // A compact stat strip that frames the map as a dashboard. Every tile is computed from data the
+  // client ALREADY holds — no extra tool or query — and each is absent until its layer lands, so
+  // the strip fills in as the assembly runs (absent != 0: a missing datum is never rendered as 0).
+  const glance: { key: string; label: string; value: React.ReactNode; unit?: string; accent?: boolean }[] = [];
+  const competitorCount = latest.get("competitors")?.rowCount;
+  if (competitorCount !== undefined)
+    glance.push({ key: "competitors", label: "Competitors", value: competitorCount.toLocaleString("en") });
+  // The #1 pick's score out of 100 — computed under the CURRENT weights exactly as the Top-picks
+  // table renders it (gapDisplay), so the two never show different numbers for the same pick when a
+  // slider moves. Rendered in text ink, not the accent: the palette reserves C.accent for chrome,
+  // never a data value (dataviz: values wear text tokens).
+  const pick1 = picks.find((f) => f.properties.rank === 1)?.properties;
+  const topScore = pick1 ? (scale ? gapDisplay(pick1 as CellProps, scale, weights) : pick1.gap) : undefined;
+  if (topScore !== undefined)
+    glance.push({ key: "top", label: "Top score", value: Math.round(topScore), unit: "/ 100" });
+  if (medianOpportunity !== undefined)
+    glance.push({ key: "median", label: "Median opportunity", value: Math.round(medianOpportunity), unit: "/ 100" });
+  // Momentum rides its own trend part; the tile is absent when the trade had too little history —
+  // never a fake "flat" here (absent != 0; the sparkline below states the not-enough-history case).
+  if (trend)
+    glance.push({
+      key: "momentum",
+      label: "Momentum",
+      value: trend.direction,
+      unit: trend.pctChange != null ? `${trend.pctChange >= 0 ? "+" : ""}${trend.pctChange}%` : undefined,
+    });
+
   return (
     <div
       style={{
@@ -900,6 +955,21 @@ export function Chat() {
             →
           </button>
         </form>
+
+        {/* Market at a glance (feature 006): a compact stat strip that frames the map as a dashboard.
+            It appears once the first tile has a datum and fills in as the assembly runs — each tile
+            stays absent (never a 0 or a dash-as-fact) until its own layer has landed. 3-4 tiles max,
+            read at a glance, serving the map rather than becoming a wall of numbers. */}
+        {glance.length > 0 && (
+          <section>
+            <Label>Market at a glance</Label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+              {glance.map((t) => (
+                <StatTile key={t.key} label={t.label} value={t.value} unit={t.unit} accent={t.accent} />
+              ))}
+            </div>
+          </section>
+        )}
 
         {caption && (
           <div
@@ -1665,6 +1735,54 @@ function Label({ children, inline }: { children: React.ReactNode; inline?: boole
       }}
     >
       {children}
+    </div>
+  );
+}
+
+/**
+ * A stat tile for the "market at a glance" strip (feature 006): a muted MONO label over a prominent
+ * value in the text ink. At most one value in the strip takes the accent (the #1 pick's score, set
+ * by the caller); the pick yellow C.win is never spent here. No chart, no sparkline — this is a
+ * number that reads at a glance and serves the map, per the dataviz discipline.
+ */
+function StatTile({
+  label,
+  value,
+  unit,
+  accent,
+}: {
+  label: string;
+  value: React.ReactNode;
+  unit?: string;
+  accent?: boolean;
+}) {
+  return (
+    <div style={{ flex: "1 1 72px", minWidth: 72 }}>
+      <div
+        style={{
+          fontFamily: MONO,
+          fontSize: 9,
+          letterSpacing: ".1em",
+          color: C.dim,
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 3, marginTop: 3 }}>
+        <span
+          style={{
+            fontFamily: MONO,
+            fontSize: 18,
+            fontWeight: 600,
+            lineHeight: 1,
+            color: accent ? C.accent : C.text,
+          }}
+        >
+          {value}
+        </span>
+        {unit && <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>{unit}</span>}
+      </div>
     </div>
   );
 }
