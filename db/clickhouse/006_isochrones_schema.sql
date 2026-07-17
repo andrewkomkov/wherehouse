@@ -240,6 +240,26 @@ ORDER BY (origin_h3_9, minutes);
 --     returning a stranger's catchment, which is exactly what it did before search_cutoff
 --     was set (see infra/valhalla.sh).
 --
+--     WHY 150 m IS A CLEAN CUT, MEASURED. Distance from a populated res-9 cell centroid to
+--     the nearest routable edge, sampled over 3,955 Berlin cells via Valhalla /locate:
+--
+--         p10   3.3 m | p25  10.7 m | p50   39.3 m | p75  987.9 m
+--         p90 3655.7 m | p95 5382.6 m | p99 10283.9 m | max 13692.1 m
+--
+--     The distribution is bimodal, not gradual: half the cells sit essentially ON the
+--     network (p50 = 39 m) and the rest are nowhere near it (p75 = 988 m, max 13.7 km).
+--     There is very little in between, so the threshold is not a knife-edge — anything from
+--     ~100-300 m selects nearly the same set. >150 m is 37.4% of cells, which is why the
+--     skip rate lands at 36.9%.
+--
+--     AND THE PART WORTH UNDERSTANDING: only a MINORITY of the dropped cells were ever
+--     detectably wrong. A distance ceiling only catches an origin snapped so far that the
+--     contour overshoots the ceiling — about 1,800 of Berlin's 5,843 dropped cells (~31%).
+--     The other ~69% were snapped 150-1500 m, produced a perfectly plausible contour that
+--     no distance check could fail, and were simply the catchment of a road somewhere else.
+--     That is the argument for cutting on SNAP DISTANCE rather than on output distance:
+--     the output check finds the embarrassing third, the cutoff finds all of it.
+--
 --     Berlin's 36.9% is 3x Amsterdam's and is worth knowing before someone reports it as a
 --     bug. Its bbox is the widest of the three and reaches well outside the city — the same
 --     box holds 4.25M people against ~3.6M in the city proper (web/src/trigger/scoring.ts
@@ -253,10 +273,24 @@ ORDER BY (origin_h3_9, minutes);
 --
 --   * Contours are PEDESTRIAN. A 15-min drive is a different table we did not build.
 --
---   * A few contours legitimately break the walking ceiling. 4 Berlin origins reach 2.2 km
---     in 15 minutes because Valhalla's pedestrian graph includes a ferry — verified via
---     /trace_attributes, which reports use=ferry over 2.10 km named
---     'F10 Alt Kladow -> S Wannsee'. Real, not a bug; 7 cells of 247,036.
+--   * THE FERRY, AND ITS ONE DISHONEST EDGE. Exactly 4 Berlin origins reach ~2.2 km in 15
+--     minutes, which is 8.8 km/h and looks like a bug. It is not. Measured end to end:
+--
+--       /route origin -> far lobe = 2.36 km in 874 s, and it decomposes as
+--         2.10 km @ 11.0 km/h  use=ferry    'F10 Alt Kladow -> S Wannsee'
+--         0.26 km @  5.0 km/h  use=road/footway   (the actual walking)
+--       874 s < the 900 s budget, so the far shore really is inside the 15-min contour.
+--
+--     Generalization was the obvious suspect and is REFUTED, not dismissed: sweeping
+--     generalize 0 -> 5 -> 20 -> 50 -> 100 moves the furthest reach by 0.0 m. It smooths
+--     the boundary by metres; it cannot invent 950 m.
+--
+--     BUT BE HONEST ABOUT WHAT THE FERRY MODEL IS: Valhalla treats F10 as an always-
+--     available edge at 11 km/h. There is no timetable in the graph, so these 4 origins'
+--     15-minute catchment assumes the boat is waiting. The real F10 is scheduled. So those
+--     catchments are OPTIMISTIC, not wrong — and if anyone ever demos a Kladow origin, that
+--     is the sentence to say out loud. 7 cells of 247,036; bounded, negligible, stated.
+--     (`use_ferry: 0` does not suppress it — identical geometry, verified. Unexplained.)
 --   * Population is a res-8 uniform-split PROXY, not a census. See the `/ 7` note above and
 --     003_population_schema.sql, which makes the same point about Kontur itself.
 --

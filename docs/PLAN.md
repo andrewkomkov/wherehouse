@@ -1,9 +1,23 @@
 # Implementation plan — 17→23 July 2026
 
 **Hard deadline: 23 July 12:00 UTC** (00:00 AoE), server-enforced, no extensions.
-Minus the demo video and the flip to public, **effective code time ends 21 July evening.**
 
-That is **four working days**, not six. Plan accordingly.
+> ## ⚠️ "Day N" below is a PHASE, not a date. Read this before pacing anything.
+>
+> The original plan mapped day 1 → 17 Jul, day 2 → 18 Jul, and so on, and budgeted four
+> working days. **Reality, from `git log`: days 1 through 4 all landed on 17 July, between
+> 10:29 and 13:56.** Four planned days in three and a half hours. At that point there were
+> **5 days 22 hours** left on the clock.
+>
+> The date mapping is therefore fiction, and it is a *dangerous* fiction: it was used to
+> justify cuts. ADR-003 was proposed for cutting "for time" when time was never the binding
+> constraint. **Do not cut anything for schedule without re-checking the actual clock** —
+> `date -u` against 23 Jul 12:00 UTC, not the day number in this heading.
+>
+> Constitution VI still holds: scope is bounded by the clock and features are ranked against
+> the rubric. But *a schedule you have already outrun is not a reason to cut* — that is
+> cargo-culting the plan over the situation. Cut things because they don't move a criterion,
+> or because they carry real risk. Not because a heading says day 5.
 
 ## How features are ranked
 
