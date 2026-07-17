@@ -140,11 +140,15 @@ Tooling on this machine: node 26, pnpm 10.33, `gh` authed as `andrewkomkov`.
 
 Read these before writing any geo SQL. Each cost real time today.
 
-1. **`geoToH3(lat, lon, res)` is LAT-FIRST.** Every other ClickHouse geo function is
-   `(lon, lat)`. Overture's `geometry.1` is lon, `geometry.2` is lat — so it's
-   `geoToH3(geometry.2, geometry.1, 8)`. Getting it backwards is **silent**: counts look
-   plausible, hexes land in the Indian Ocean. **Only ever compute H3 in a `MATERIALIZED`
-   column**, never inline.
+1. **The whole H3 family is LAT-FIRST.** Every other ClickHouse geo function is `(lon, lat)`.
+   - `geoToH3(lat, lon, res)` — Overture's `geometry.1` is lon, `geometry.2` is lat, so it's
+     `geoToH3(geometry.2, geometry.1, 8)`. Getting it backwards is **silent**: counts look
+     plausible, hexes land in the Indian Ocean. **Only ever compute H3 in a `MATERIALIZED`
+     column**, never inline.
+   - `h3ToGeo(h3)` returns **`(lat, lon)`** — verified 19 Jul:
+     `h3ToGeo(stringToH3('881f1d4881fffff'))` → `(52.5236, 13.3737)`. A bbox filter written
+     as `h3ToGeo(h3).1 BETWEEN <lon range>` returns **zero rows with no error** — an empty
+     map, not a crash. This one bit the day-3 scoring query while it was being written.
 
 2. **Filter Overture on `bbox.*`, never on `geometry`.** `bbox` is plain floats, so
    Parquet row-group stats prune ~everything. Filtering `geometry` forces a full decode.

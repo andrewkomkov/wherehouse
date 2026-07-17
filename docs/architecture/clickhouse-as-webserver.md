@@ -53,6 +53,16 @@ Access-Control-Allow-Headers: origin, x-requested-with, …, Authorization
 Returned **without** `add_http_cors_header=1`. So the browser can query ClickHouse
 Cloud directly — no proxy needed for data either.
 
+⚠️ **Refined 19 July — the headers are echoed only when the request carries `Origin`.**
+A browser always sends it; `curl` never does unless told. A plain `curl -D-` therefore shows
+**no CORS headers at all** and reads exactly like "CORS is broken on Cloud" — it isn't, and
+this nearly triggered a redesign of the day-3 handle path. Always test with
+`-H "Origin: http://localhost:3000"`. Preflight `OPTIONS` → `204` with the full header set.
+
+Also verified: passing `add_http_cors_header=1` as a URL param **fails with HTTP 500** for a
+`readonly=1` user — it's a setting, so it hits the same wall as row 5 of the table below.
+It is unnecessary; don't pass it.
+
 ### 4. A public read-only user is genuinely safe ✅
 
 ```sql
