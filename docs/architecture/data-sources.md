@@ -59,7 +59,8 @@ GROUP BY cat ORDER BY n DESC
 H3 density of bakeries in Berlin — **1.1 s**:
 
 ```sql
-SELECT geoToH3(geometry.1, geometry.2, 8) AS h3, count() AS n
+SELECT geoToH3(geometry.2, geometry.1, 8) AS h3, count() AS n
+--            ^^^^^^^^^^^ lat FIRST — see the trap below
 FROM s3('.../theme=places/type=place/*.parquet', 'Parquet')
 WHERE bbox.xmin BETWEEN 13.088 AND 13.761
   AND bbox.ymin BETWEEN 52.338 AND 52.675
@@ -67,7 +68,24 @@ WHERE bbox.xmin BETWEEN 13.088 AND 13.761
 GROUP BY h3 ORDER BY n DESC
 ```
 
-Note `geometry.1` = lon, `geometry.2` = lat (tuple access on `Point`).
+## ⚠️ The coordinate-order trap — we already hit it once
+
+`geometry.1` = **lon**, `geometry.2` = **lat** (tuple access on `Point`). ClickHouse
+is `(lon, lat)` everywhere — **except `geoToH3`, which is `(lat, lon)`**. It is the
+only geo function that flips. `h3ToGeo` likewise returns `(lat, lon)`.
+
+This bug is silent and cost us a wrong choropleth on day 1. Verified on our service:
+
+```sql
+SELECT h3ToGeo(geoToH3(52.52, 13.40, 8)),   -- (52.520, 13.399) ✅ Berlin
+       h3ToGeo(geoToH3(13.40, 52.52, 8))    -- (13.402, 52.520) ❌ Indian Ocean
+```
+
+Both round-trip cleanly and both produce plausible-looking cell counts, so nothing
+crashes and nothing looks wrong — the hexes are just in the sea off Somalia.
+
+**Mitigation:** never call `geoToH3` inline. Define it once as a materialized column
+(`h3_8 UInt64 MATERIALIZED geoToH3(lat, lon, 8)`) and query that column everywhere.
 
 ## Consequences
 
