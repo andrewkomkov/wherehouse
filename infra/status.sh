@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# What is actually running right now, and what is it costing us.
+# Read-only — safe to run any time.
+#
+# NB: formatters use  python3 -c "$(cat <<'PY' ... PY)"  rather than  python3 - <<'PY',
+# because a heredoc on `python3 -` steals stdin and the piped JSON never arrives.
+
+# shellcheck source=infra/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+load_env
+
+ORG="$(api GET /organizations | jq_r "['result'][0]['id']")"
+[[ -n "$ORG" ]] || die "no organization visible — check the API key in .env"
+echo "org: $ORG"
+echo
+
+echo "── ClickHouse services ──────────────────────────────────"
+api GET "/organizations/$ORG/services" | python3 -c "$(cat <<'PY'
+import sys, json
+for s in json.load(sys.stdin)["result"]:
+    ep = next((e for e in s.get("endpoints", []) if e["protocol"] == "https"), {})
+    print(f'  {s["name"]:<24} {s["state"]:<10} v{s["clickhouseVersion"]:<6} '
+          f'{s["releaseChannel"]:<8} {ep.get("host","-")}:{ep.get("port","")}')
+    print(f'  {"":<24} mcp={s.get("mcpEnabled")}  '
+          f'idle={s.get("idleScaling")}/{s.get("idleTimeoutMinutes")}min  '
+          f'mem={s.get("minTotalMemoryGb")}-{s.get("maxTotalMemoryGb")}GB')
+PY
+)"
+
+echo
+echo "── Managed Postgres (OLTP) ──────────────────────────────"
+api GET "/organizations/$ORG/postgres" | python3 -c "$(cat <<'PY'
+import sys, json
+rows = json.load(sys.stdin)["result"]
+if not rows:
+    print("  (none)")
+for p in rows:
+    print(f'  {p["name"]:<24} {p["state"]:<10} pg{p["postgresVersion"]:<3} '
+          f'{p["size"]:<14} {p["storageSize"]}GB  ha={p["haType"]}')
+    # hostname is only present on GET-by-id / create, not in the list response
+    if p.get("hostname"):
+        print(f'  {"":<24} {p["hostname"]}')
+PY
+)"
+
+echo
+echo "── ClickPipes (CDC) ─────────────────────────────────────"
+SVC="$(api GET "/organizations/$ORG/services" | jq_r "['result'][0]['id']")"
+api GET "/organizations/$ORG/services/$SVC/clickpipes" 2>/dev/null | python3 -c "$(cat <<'PY'
+import sys, json
+try:
+    rows = json.load(sys.stdin)["result"]
+except Exception:
+    rows = []
+if not rows:
+    print("  (none)")
+for p in rows:
+    src = next(iter(p.get("source", {})), "?")
+    dst = p.get("destination", {}).get("database", "?")
+    print(f'  {p["name"]:<24} {p["state"]:<12} {src} -> {dst}')
+PY
+)"
+
+echo
+echo "── CDC freshness ────────────────────────────────────────"
+if [[ -n "${CLICKHOUSE_PASSWORD:-}" && -n "${CLICKHOUSE_URL:-}" ]]; then
+    curl -s --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "
+      SELECT concat('  ', name, ': ', toString(total_rows), ' rows')
+      FROM system.tables WHERE database='oltp' AND name LIKE 'pg_%'
+      ORDER BY name FORMAT TSVRaw" 2>/dev/null || echo "  (clickhouse unreachable)"
+else
+    echo "  (CLICKHOUSE_URL / CLICKHOUSE_PASSWORD unset in .env)"
+fi

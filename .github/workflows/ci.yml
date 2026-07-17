@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The repo flips to PUBLIC on 23 July with live ClickHouse / Trigger.dev / Postgres
+  # credentials sitting in a local .env. This job is the seatbelt: it fails the build
+  # if a secret ever reaches a commit. It is the most important job here.
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks needs history, not just the tip
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: no env files tracked
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$|\.env\.(local|production)$|api-key.*\.txt$|\.secrets/'; then
+            echo "::error::a credential file is tracked by git — remove it before this repo goes public"
+            exit 1
+          fi
+          echo "no credential files tracked"
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck infra scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning infra/*.sh
+
+  sql:
+    name: sql sanity
+    runs-on: ubuntu-latest
+    services:
+      # Same major version as our ClickHouse-managed Postgres, so the OLTP schema is
+      # verified against a real server on every push — no credentials required.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: apply OLTP schema
+        env:
+          PGPASSWORD: ci
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -q \
+               -f db/postgres/001_oltp_schema.sql
+          echo "--- tables ---"
+          psql -h localhost -U postgres -t -A -c \
+               "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY 1;"
+          echo "--- publication must exist for CDC to work ---"
+          psql -h localhost -U postgres -t -A -c \
+               "SELECT pubname FROM pg_publication;" | grep -q wherehouse_pub \
+            || { echo "::error::publication wherehouse_pub missing — ClickPipes CDC would break"; exit 1; }
+
+  docs:
+    name: docs links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: relative links resolve
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            while IFS= read -r link; do
+              case "$link" in http*|\#*|mailto:*) continue;; esac
+              target="$(dirname "$f")/${link%%#*}"
+              [ -e "$target" ] || { echo "::error file=$f::broken link -> $link"; fail=1; }
+            done < <(grep -oE '\]\([^)]+\)' "$f" | sed -E 's/^\]\(//; s/\)$//')
+          done < <(find . -name '*.md' -not -path './node_modules/*')
+          exit $fail
