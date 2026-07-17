@@ -4,10 +4,13 @@
  * `scoreArea` (the choropleth) and `rankSites` (the top 3) must never disagree, so they read
  * the same CTE rather than each carrying a copy that drifts.
  *
- *     gap = demand_n × (100 − supply_n) / 100
+ *     gap = demand_n × (100 − supply_n) / 100 × acc_n / 100
  *
  * Deliberately a formula you can explain in one breath to a judge, not a model. Its honesty
  * comes from what goes into it and from stating what it leaves out — not from being clever.
+ *
+ * The third term is accessibility (residents within a 10-min walk); it is OMITTED, never zeroed,
+ * when unmeasured — a cell with no measured catchment scores on the first two terms alone.
  */
 
 /** Bounding box, not an administrative boundary. */
@@ -84,26 +87,48 @@ function candidateCells(city: CityName, categories: string[]): string {
     WHERE city = '${city}' AND category IN (${catList})
     GROUP BY cell
   ),
+  acc AS (
+    -- Residents reachable on foot in 10 min from the cell's res-9 centre child (D2), against
+    -- the real street network. population/7 spreads a res-8 parent evenly over its seven res-9
+    -- children — the same granularity the product already ranks on (data-model.md).
+    -- geo.isochrone_cells is joined, never drawn; equality on both sides' sort key (D6).
+    -- has_acc = toUInt8(1) is the unambiguous 'a row existed' flag: a LEFT JOIN miss below fills
+    -- the non-nullable acc_pop with 0, and a real acc of 0.286 exists, so 0 alone is ambiguous.
+    SELECT o.h3_8 AS cell, sum(p.population / 7) AS acc_pop, toUInt8(1) AS has_acc
+    FROM (SELECT h3_8, h3ToCenterChild(h3_8, 9) AS origin FROM cells) o
+    INNER JOIN geo.isochrone_cells ic ON ic.origin_h3_9 = o.origin AND ic.minutes = 10 AND ic.city = '${city}'
+    INNER JOIN geo.population p ON p.h3_8 = h3ToParent(ic.reachable_h3_9, 8) AND p.country = '${country}'
+    GROUP BY o.h3_8
+  ),
   joined AS (
-    SELECT c.h3_8 AS cell, c.population AS pop, coalesce(s.n, 0) AS sup
-    FROM cells c LEFT JOIN supply s ON c.h3_8 = s.cell
+    SELECT c.h3_8 AS cell, c.population AS pop, coalesce(s.n, 0) AS sup,
+      a.acc_pop AS acc_pop, coalesce(a.has_acc, 0) AS has_acc
+    FROM cells c
+    LEFT JOIN supply s ON c.h3_8 = s.cell
+    LEFT JOIN acc a ON c.h3_8 = a.cell
   ),
   scale AS (
     -- greatest(..., 1) guards the divide for a category with almost no supply.
-    SELECT quantile(0.95)(pop) AS pop_p95, greatest(quantile(0.95)(sup), 1) AS sup_p95
+    SELECT quantile(0.95)(pop) AS pop_p95, greatest(quantile(0.95)(sup), 1) AS sup_p95,
+      -- p95 over MEASURED cells only — the 830 absent Berlin cells must not drag the scale down.
+      greatest(quantileIf(0.95)(acc_pop, has_acc = 1), 1) AS acc_p95
     FROM joined
   ),
   scored AS (
     SELECT cell, pop, sup,
       least(100, 100 * pop / pop_p95)                                     AS demand_n,
       least(100, 100 * sup / sup_p95)                                     AS supply_n,
-      demand_n * (100 - supply_n) / 100                                   AS gap,
-      -- Carried through so choroplethStatsSql can hand the two scalars to the browser, which
+      least(100, 100 * acc_pop / acc_p95)                                 AS acc_n,
+      -- Three-term product. When accessibility is absent, if(has_acc, ...) yields 1 so the factor
+      -- drops out and the cell scores on the other two exactly as before this feature (D4).
+      demand_n * (100 - supply_n) / 100 * if(has_acc, acc_n / 100, 1)     AS gap,
+      -- Carried through so choroplethStatsSql can hand the three scalars to the browser, which
       -- re-derives this same score for the re-weight sliders. It must not guess them: a p95
       -- recomputed client-side is a different p95, and the map would drift off the ranking the
-      -- agent just gave. See the Scale type in layers.ts.
+      -- agent just gave. See the Scale type in layers.ts. has_acc/acc_pop ride along too so the
+      -- stats and choropleth queries can mark absence and print the measured value.
       -- (No backticks in here — this string is a JS template literal and one would close it.)
-      pop_p95, sup_p95
+      pop_p95, sup_p95, acc_p95, has_acc, acc_pop
     FROM joined, scale
   )`;
 }
@@ -140,7 +165,10 @@ export function choroplethSql(city: CityName, categories: string[]): string {
       ), ','),
       ']]},"properties":{"gap":', toString(round(gap, 1)),
       ',"pop":', toString(round(pop)),
-      ',"sup":', toString(sup), '}}')), ','),
+      ',"sup":', toString(sup),
+      -- absent != 0: the acc key exists only when the catchment was measured (has_acc=1).
+      -- JSON.stringify's rule expressed in SQL — an unmeasured cell has no acc key at all.
+      if(has_acc, concat(',"acc":', toString(round(acc_pop))), ''), '}}')), ','),
     ']}')
   FROM scored`;
 }
@@ -158,7 +186,9 @@ export function choroplethStatsSql(city: CityName, categories: string[]): string
          round(max(gap), 1) AS topGap,
          round(median(gap), 1) AS medianGap,
          any(pop_p95) AS popP95,
-         any(sup_p95) AS supP95
+         any(sup_p95) AS supP95,
+         any(acc_p95) AS accP95,
+         countIf(has_acc = 0) AS notMeasured
   FROM scored`;
 }
 
@@ -189,6 +219,11 @@ export function choroplethStatsSql(city: CityName, categories: string[]): string
  * a Gemeinde in Brandenburg, a municipality in NL and a village in RS. Naming these columns
  * `ortsteil`/`bezirk` (the first cut) encoded a Berlin assumption as universal — the same defect
  * class this whole table exists to fix. See db/clickhouse/005_districts_schema.sql.
+ *
+ * `WHERE s.has_acc = 1` excludes cells whose walk we could not measure. Their `gap` is a
+ * two-factor score (the accessibility term drops out), so ranking them against measured cells
+ * would compare two different scores — a cell could top the list purely by never being measured.
+ * The choropleth still shows them (styled as not-measured); only the ranking omits them.
  */
 export function rankSql(city: CityName, categories: string[], limit = 3): string {
   return `WITH ${candidateCells(city, categories)}
@@ -202,6 +237,7 @@ export function rankSql(city: CityName, categories: string[], limit = 3): string
          d.locality                  AS locality
   FROM scored AS s
   LEFT JOIN geo.districts AS d ON s.cell = d.h3_8 AND d.city = '${city}'
+  WHERE s.has_acc = 1
   ${DETERMINISTIC_ORDER}
   LIMIT ${limit}`;
 }
@@ -231,4 +267,54 @@ export function bboxSql(city: CityName, categories: string[]): string {
   return `SELECT min(lon) AS minLon, min(lat) AS minLat, max(lon) AS maxLon, max(lat) AS maxLat
   FROM geo.places
   WHERE city = '${city}' AND category IN (${catList})`;
+}
+
+/**
+ * The walk catchment of a single pick, as one GeoJSON string — one Feature **per lobe** (D5).
+ *
+ * `geo.isochrones` stores a multi-lobed contour as several rows on purpose (445 of Berlin's are
+ * multi-lobed); collapsing them is how a catchment gets drawn 2 km from the cell it labels. The
+ * origin is the pick's res-9 centre child — the SAME rule the score uses (D2), so the drawn shape
+ * and the ranked number are one measurement, not two that can disagree.
+ *
+ * ⚠️ The `geojson` column is emitted **verbatim**. Valhalla emits GeoJSON, GeoJSON is [lon, lat],
+ * and it was stored exactly as emitted — so, unlike every H3 path in this file, there is NO
+ * coordinate swap here. Do not "tidy" it. A contour is rendered, never joined (data-model.md).
+ *
+ * Zero rows ⇒ the concat yields an empty features array ⇒ the caller treats the pick as not
+ * measured. `pickH3` is the pick's res-8 h3 string, straight from rankSql's `h3ToString`.
+ *
+ * Measured, Berlin pick #1: 1 lobe, sub-second.
+ */
+export function catchmentSql(city: CityName, pickH3: string): string {
+  const h3 = pickH3.replace(/'/g, "''");
+  return `WITH h3ToCenterChild(stringToH3('${h3}'), 9) AS oc
+  SELECT concat('{"type":"FeatureCollection","features":[',
+    arrayStringConcat(groupArray(concat(
+      '{"type":"Feature","geometry":{"type":"Polygon","coordinates":', geojson,
+      '},"properties":{"minutes":10,"h3":"${h3}","rank":1}}')), ','),
+    ']}')
+  FROM geo.isochrones WHERE origin_h3_9 = oc AND minutes = 10 AND city = '${city}'`;
+}
+
+/**
+ * Cheap stats for the catchment layer — never geometry (ADR-001).
+ *
+ * `lobes` counts the contour rows (a multi-lobed catchment is several); `reachablePeople` is the
+ * same population/7 sum the score's `acc` term uses, so the number under the drawn shape is the
+ * number that moved the pick up the ranking. `reachablePeople = 0` with `lobes = 0` means the
+ * pick's centre child never routed — the not-measured case. Country resolves from CITIES.
+ *
+ * Measured, Berlin pick #1 (881f18b021): lobes = 1, reachablePeople = 14,780.
+ */
+export function catchmentStatsSql(city: CityName, pickH3: string): string {
+  const { country } = CITIES[city];
+  const h3 = pickH3.replace(/'/g, "''");
+  return `WITH h3ToCenterChild(stringToH3('${h3}'), 9) AS oc
+  SELECT
+    (SELECT count() FROM geo.isochrones
+     WHERE origin_h3_9 = oc AND minutes = 10 AND city = '${city}') AS lobes,
+    (SELECT round(sum(p.population / 7)) FROM geo.isochrone_cells ic
+       INNER JOIN geo.population p ON p.h3_8 = h3ToParent(ic.reachable_h3_9, 8) AND p.country = '${country}'
+     WHERE ic.origin_h3_9 = oc AND ic.minutes = 10 AND ic.city = '${city}') AS reachablePeople`;
 }

@@ -48,7 +48,7 @@ import type { ExpressionSpecification } from "maplibre-gl";
  * The p95 scalars ClickHouse used for THIS query's `gap`. Not re-derivable in the browser —
  * see the header. Sent on the `opportunity` part.
  */
-export type Scale = { popP95: number; supP95: number };
+export type Scale = { popP95: number; supP95: number; accP95: number };
 
 /** The per-cell properties the choropleth GeoJSON carries (scoring.ts → choroplethSql). */
 export type CellProps = {
@@ -58,9 +58,11 @@ export type CellProps = {
   pop: number;
   /** Competitors in the k=1 ring (~1 km across). */
   sup: number;
+  /** residents within a 10-min walk — ABSENT means not measured */
+  acc?: number;
 };
 
-export type FactorId = "residents" | "lowCompetition";
+export type FactorId = "residents" | "lowCompetition" | "accessibility";
 
 type Factor = {
   id: FactorId;
@@ -78,19 +80,25 @@ type Factor = {
   term: (p: CellProps, s: Scale) => number;
   /** The same value as a MapLibre expression, so recolouring never re-serializes the layer. */
   expr: (s: Scale) => ExpressionSpecification;
+  /** JS side: false ⇒ the factor is absent for this cell and drops out of the product. */
+  available?: (p: CellProps) => boolean;
+  /** MapLibre side: the same absence test as an expression. */
+  guard?: ExpressionSpecification;
 };
 
 /**
  * The factors the user may re-weight — **exactly the ones we have data for**.
  *
- * Deliberately absent, and each absence is a decision:
+ * **Accessibility** landed as the third entry (Valhalla isochrones) exactly as the header
+ * promised — one FACTORS entry, no rewrite, and neutral still reduces to the plain product. It
+ * is the one factor a cell may lack: an unmeasured walk is ABSENT, not zero, so it carries an
+ * `available`/`guard` pair and drops out of the product for cells it was never measured on.
+ *
+ * Still deliberately absent, and the absence is a decision:
  *
  * - **Low rent** — cut. We hold no rent data: no source, no proxy, nothing. The mockup fills it
  *   with a Gaussian field. A slider with nothing behind it is a control that lies every time it
  *   is dragged, and it is the first thing a domain expert on the jury would test.
- * - **Accessibility** — not yet. Valhalla isochrones are being computed as this ships. It slots
- *   in here as a third entry the day the data is real; the exponent form already generalises to
- *   N factors, so nothing else changes.
  */
 export const FACTORS: readonly Factor[] = [
   {
@@ -113,6 +121,16 @@ export const FACTORS: readonly Factor[] = [
     term: (p, s) => 100 - Math.min(100, (100 * p.sup) / s.supP95),
     expr: (s) => ["-", 100, ["min", 100, ["/", ["*", 100, ["get", "sup"]], s.supP95]]],
   },
+  {
+    id: "accessibility",
+    label: "Accessibility",
+    note: "Valhalla · residents within a 10-min walk",
+    // acc_n = least(100, 100 * acc / acc_p95). Absent ⇒ dropped, not zeroed (see `available`).
+    term: (p, s) => Math.min(100, (100 * (p.acc ?? 0)) / s.accP95),
+    expr: (s) => ["min", 100, ["/", ["*", 100, ["get", "acc"]], s.accP95]],
+    available: (p) => p.acc !== undefined,
+    guard: ["has", "acc"],
+  },
 ];
 
 export type Weights = Record<FactorId, number>;
@@ -121,7 +139,7 @@ export type Weights = Record<FactorId, number>;
  * Neutral = every factor equal. This is the ONLY position at which the map is the agent's own
  * ranking; the UI says so when the user leaves it (see `isNeutral`).
  */
-export const NEUTRAL: Weights = { residents: 50, lowCompetition: 50 };
+export const NEUTRAL: Weights = { residents: 50, lowCompetition: 50, accessibility: 50 };
 
 export const isNeutral = (w: Weights): boolean =>
   FACTORS.every((f) => w[f.id] === NEUTRAL[f.id]);
@@ -145,7 +163,11 @@ function exponents(w: Weights): Record<FactorId, number> {
 export function gapOf(p: CellProps, s: Scale, w: Weights): number {
   const e = exponents(w);
   let acc = 100;
-  for (const f of FACTORS) acc *= Math.pow(f.term(p, s) / 100, e[f.id]);
+  for (const f of FACTORS) {
+    // An absent factor (accessibility on an unmeasured cell) drops out — same as ×1.
+    if (f.available && !f.available(p)) continue;
+    acc *= Math.pow(f.term(p, s) / 100, e[f.id]);
+  }
   return Math.max(0, Math.min(100, acc));
 }
 
@@ -169,7 +191,12 @@ export function gapExpression(s: Scale, w: Weights): ExpressionSpecification {
   const e = exponents(w);
   let acc: ExpressionSpecification = ["literal", 100] as unknown as ExpressionSpecification;
   for (const f of FACTORS) {
-    acc = ["*", acc, ["^", ["/", f.expr(s), 100], e[f.id]]];
+    // A guarded factor drops to ×1 exactly where `gapOf` skips it, so the two stay bit-identical.
+    const contrib: ExpressionSpecification = ["^", ["/", f.expr(s), 100], e[f.id]];
+    const factor: ExpressionSpecification = f.guard
+      ? ["case", f.guard, contrib, ["literal", 1]]
+      : contrib;
+    acc = ["*", acc, factor];
   }
   return ["max", 0, ["min", 100, acc]];
 }

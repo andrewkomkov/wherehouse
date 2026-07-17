@@ -18,6 +18,7 @@ import {
   NEUTRAL,
   fillColor,
   gapDisplay,
+  gapExpression,
   isNeutral,
   type CellProps,
   type Weights,
@@ -81,16 +82,18 @@ const SANS = "'IBM Plex Sans', system-ui, sans-serif";
  * tempted to advance these on a schedule so the demo looks smooth, don't: a progress indicator
  * that runs ahead of the work is the "loading skeleton that pretends" the brief bans.
  *
- * The comp has a 7th wave, "Walk catchment · Valhalla", between competitors and the surface.
- * **It is deliberately absent**: the isochrones are still being computed by another workstream,
- * and a row that never leaves ○ is worse than a row that isn't there. Adding it is one entry
- * here plus one `LAYER` case — nothing else in this file assumes there are exactly four.
+ * The comp places a 7th wave, "Walk catchment · Valhalla", between competitors and the surface.
+ * It cannot go there — the catchment is *of a pick*, so it is ranked last, after `picks` and
+ * before the caption (research D5: the comp was drawn before the data existed). Its state is
+ * derived the same way as every other layer wave: ● only when the contour is genuinely on the
+ * map, ◐ only while `showCatchment` is genuinely running. Never a timer.
  */
 const WAVES = [
   { key: "read", label: "Read the question", source: "agent" },
   { key: "competitors", label: "Competitor dots", source: "ClickHouse", tool: "tool-findCompetitors", layer: "competitors" },
   { key: "opportunity", label: "Opportunity surface", source: "ClickHouse", tool: "tool-scoreArea", layer: "opportunity" },
   { key: "picks", label: "Rank top 3", source: "agent", tool: "tool-rankSites", layer: "picks" },
+  { key: "catchment", label: "Walk catchment", source: "Valhalla", tool: "tool-showCatchment", layer: "catchment" },
   { key: "caption", label: "Caption", source: "agent" },
 ] as const;
 
@@ -116,7 +119,12 @@ async function fetchLayer(handle: string, signal: AbortSignal): Promise<GeoJSON.
   return JSON.parse(await res.text());
 }
 
-const LAYER_IDS: LayerId[] = ["opportunity", "competitors", "picks"];
+const LAYER_IDS: LayerId[] = ["opportunity", "competitors", "picks", "catchment"];
+
+// The teal band for the walk catchment. Kept clear of the competitor warm and the pick yellow so
+// the shape reads as "the walk", not a data value: a low-alpha fill under a crisp accent outline.
+const CATCHMENT_FILL_OPACITY = 0.14;
+const CATCHMENT_LINE_WIDTH = 2;
 
 // ---------------------------------------------------------------------------------------------
 // Animation
@@ -230,6 +238,22 @@ function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
           "line-opacity": 0,
         },
       });
+      // The walk catchment: fill + outline, drawn OVER the opportunity surface and UNDER the
+      // competitor dots and the pick markers, so nothing the contour encloses is hidden by it
+      // (contract: under picks, over opportunity). Colour is set once here; the reveal only moves
+      // opacity/width, so it never re-derives the teal.
+      m.addLayer({
+        id: "catchment",
+        type: "fill",
+        source: "catchment",
+        paint: { "fill-color": C.accent, "fill-opacity": 0 },
+      });
+      m.addLayer({
+        id: "catchment-line",
+        type: "line",
+        source: "catchment",
+        paint: { "line-color": C.accent, "line-width": 0, "line-opacity": 0 },
+      });
       m.addLayer({
         id: "competitors",
         type: "circle",
@@ -276,6 +300,7 @@ export function Chat() {
     opportunity: true,
     competitors: true,
     picks: true,
+    catchment: true,
   });
   const [selected, setSelected] = useState<number | null>(null);
   const [replaying, setReplaying] = useState(false);
@@ -379,6 +404,29 @@ export function Chat() {
         m.setPaintProperty("opportunity", "fill-opacity", base);
         return;
       }
+
+      if (layer === "catchment") {
+        src!.setData(fc);
+        const fillOn = visible.catchment ? CATCHMENT_FILL_OPACITY : 0;
+        const lineOn = visible.catchment ? 1 : 0;
+        // The contour draws on: the outline strokes in first (width + opacity growing), the fill
+        // washes in a beat behind it. This is the layer arriving from Valhalla, not a decorative
+        // fade — same reveal discipline as the surface, one shape instead of 2,260.
+        await tween(
+          620,
+          (t) => {
+            m.setPaintProperty("catchment-line", "line-width", CATCHMENT_LINE_WIDTH * Math.min(1, t * 1.4));
+            m.setPaintProperty("catchment-line", "line-opacity", lineOn * Math.min(1, t * 1.6));
+            m.setPaintProperty("catchment", "fill-opacity", fillOn * Math.max(0, (t - 0.25) / 0.75));
+          },
+          cancelled,
+        );
+        if (cancelled()) return;
+        m.setPaintProperty("catchment-line", "line-width", CATCHMENT_LINE_WIDTH);
+        m.setPaintProperty("catchment-line", "line-opacity", lineOn);
+        m.setPaintProperty("catchment", "fill-opacity", fillOn);
+        return;
+      }
     },
     [visible],
   );
@@ -396,7 +444,32 @@ export function Chat() {
         // and the sliders are disabled. Showing a guessed re-derivation would be worse than
         // showing no control.
         scale
-          ? fillColor(scale, weights)
+          ? weights.accessibility > 0
+            ? // Accessibility is weighted in (which includes NEUTRAL) ⇒ a cell with no measured
+              // walk cannot be scored on it and must not be coloured as if it could. It branches
+              // on ["has","acc"] to a distinct "not measured" hue, its prominence driven by the
+              // cell's FIXED two-factor score — gapExpression(scale, NEUTRAL), NOT the live weights.
+              // This is load-bearing (research D3, FR-009a): the not-measured opacity is a stable
+              // "this cell would have been worth caring about" signal and must not be re-weighted by
+              // the sliders. With the live weights it collapses — pull Accessibility to 100 and the
+              // other two to 0 (a valid state, verify-score.mjs even probes {0,0,100}) and every
+              // remaining exponent goes to 0, each factor to ^0=1, the product to 100, so ALL 830
+              // unmeasured cells blaze at full opacity: the exact flat-fill FR-009a bans, worst
+              // precisely when the user says "I only care about the walk". Fixed neutral keeps the
+              // 735 already-faint cells faint and lets the ~6 real ones announce themselves whatever
+              // the sliders do. At accessibility weight 0 this branch is skipped and unmeasured
+              // cells rejoin the normal ramp — no special case, it falls out of the weight (FR-009b).
+              ([
+                "case",
+                ["has", "acc"],
+                fillColor(scale, weights),
+                [
+                  "interpolate", ["linear"], gapExpression(scale, NEUTRAL),
+                  0, "rgba(120,132,148,0)", 15, "rgba(132,142,158,0.14)", 40, "rgba(150,159,176,0.44)",
+                  70, "rgba(174,183,199,0.6)", 100, "rgba(198,206,220,0.72)",
+                ],
+              ] as unknown as maplibregl.ExpressionSpecification)
+            : fillColor(scale, weights)
           : ([
               "interpolate", ["linear"], ["get", "gap"],
               0, "rgba(20,32,48,0)", 15, "rgba(22,46,68,0.4)", 40, "#1c5a7a",
@@ -461,6 +534,11 @@ export function Chat() {
     m.setPaintProperty("opportunity", "fill-opacity", visible.opportunity ? 0.72 : 0);
     m.setPaintProperty("opportunity-line", "line-opacity", visible.opportunity ? 1 : 0);
     m.setPaintProperty("competitors", "circle-opacity", visible.competitors ? 0.82 : 0);
+    // Independent toggle: this touches only the catchment's own layers, never another (FR-005).
+    if (m.getLayer("catchment")) {
+      m.setPaintProperty("catchment", "fill-opacity", visible.catchment ? CATCHMENT_FILL_OPACITY : 0);
+      m.setPaintProperty("catchment-line", "line-opacity", visible.catchment ? 1 : 0);
+    }
   }, [ready, map, visible]);
 
   /**
@@ -481,6 +559,11 @@ export function Chat() {
     m.setPaintProperty("opportunity-line", "line-opacity", 0);
     m.setPaintProperty("competitors", "circle-opacity", 0);
     m.setPaintProperty("competitors", "circle-radius", 0);
+    if (m.getLayer("catchment")) {
+      m.setPaintProperty("catchment", "fill-opacity", 0);
+      m.setPaintProperty("catchment-line", "line-opacity", 0);
+      m.setPaintProperty("catchment-line", "line-width", 0);
+    }
     await sleep(120);
 
     for (const w of WAVES) {
@@ -539,6 +622,13 @@ export function Chat() {
     : null;
 
   const neutral = isNeutral(weights);
+
+  // The chip and the counter are claims about what is on screen, so they read the same live state
+  // the map does. A catchment part only exists when Valhalla measured one (the tool emits nothing
+  // otherwise — contract), so `latest.has("catchment")` IS the measured-contour test; the toggle
+  // gates whether it is actually visible (FR-003). `notMeasured` is per-answer, from ClickHouse.
+  const catchmentShown = latest.has("catchment") && visible.catchment;
+  const notMeasured = latest.get("opportunity")?.notMeasured;
 
   return (
     <div
@@ -656,11 +746,13 @@ export function Chat() {
               {/*
                * The comp's chips are CATCHMENT · MEASURED and DEMAND · EST. 2023.
                *
-               * CATCHMENT · MEASURED is **cut**: it would be true only with a Valhalla isochrone
-               * on screen, and there is none. Supply is measured — it is a count of real Overture
-               * POIs — so the measured/estimated contrast the chips exist for survives intact,
-               * making a claim we can actually defend.
+               * CATCHMENT · MEASURED is no longer cut: it appears **iff** a real Valhalla contour
+               * is genuinely on screen (`catchmentShown`, FR-003). When the pick has no measured
+               * catchment the tool emits nothing, so the chip stays absent — a drawn nothing and
+               * an undrawn nothing are different claims. Supply stays measured (a count of real
+               * Overture POIs), so the measured/estimated contrast the chips exist for holds.
                */}
+              {catchmentShown && <Chip tone="accent">CATCHMENT · MEASURED</Chip>}
               <Chip tone="accent">SUPPLY · MEASURED</Chip>
               <Chip>DEMAND · EST. 2023</Chip>
             </div>
@@ -738,7 +830,45 @@ export function Chat() {
               </span>
             }
           />
-          {/* "Walk catchment" is in the comp and is not here — no isochrones yet. See WAVES. */}
+          {/* The not-measured counter lives with the surface it describes: a distinct slate hue
+              paints the cells whose walk we could not measure, and this is how many, per answer.
+              Only meaningful while Accessibility is weighted in (FR-010). */}
+          {weights.accessibility > 0 && notMeasured !== undefined && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "2px 0 5px 54px",
+                fontFamily: MONO,
+                fontSize: 10,
+                color: "#8a949d",
+              }}
+            >
+              <span
+                style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(174,183,199,0.7)", flex: "none" }}
+              />
+              {notMeasured.toLocaleString("en")} cells · not measured
+            </div>
+          )}
+          <Toggle
+            on={visible.catchment}
+            onClick={() => setVisible((v) => ({ ...v, catchment: !v.catchment }))}
+            label="Walk catchment"
+            swatch={
+              <span style={{ width: 44, display: "flex", justifyContent: "center" }}>
+                <span
+                  style={{
+                    width: 20,
+                    height: 11,
+                    borderRadius: 6,
+                    background: "rgba(111,240,224,.14)",
+                    border: `1px solid ${C.accent}`,
+                  }}
+                />
+              </span>
+            }
+          />
           <Toggle
             on={visible.picks}
             onClick={() => setVisible((v) => ({ ...v, picks: !v.picks }))}
@@ -776,12 +906,14 @@ export function Chat() {
           </div>
 
           {/*
-           * Two sliders, not the comp's four.
+           * Three sliders, not the comp's four.
            *
            * "Low rent" is cut — we hold no rent data of any kind, and the comp fills it with a
-           * Gaussian. "Accessibility" waits for Valhalla. "Footfall" is renamed **Residents**,
-           * because Kontur counts who lives in a cell and that is not foot traffic. Each control
-           * here moves a number that came out of the database. See components/score.ts.
+           * Gaussian. "Accessibility" has landed: it is the Valhalla walk catchment as a real
+           * factor (its provenance note reads "Valhalla · residents within a 10-min walk"), and
+           * it appears here automatically because this maps over FACTORS. "Footfall" is renamed
+           * **Residents**, because Kontur counts who lives in a cell and that is not foot traffic.
+           * Each control here moves a number that came out of the database. See components/score.ts.
            */}
           {FACTORS.map((f) => (
             <div key={f.id} style={{ opacity: scale ? 1 : 0.4 }}>

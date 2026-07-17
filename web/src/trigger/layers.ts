@@ -25,7 +25,7 @@
 import { chat } from "@trigger.dev/sdk/ai";
 import type { ClickHouseClient } from "@clickhouse/client";
 
-export type LayerId = "competitors" | "opportunity" | "picks";
+export type LayerId = "competitors" | "opportunity" | "picks" | "catchment";
 
 export type BBox = [number, number, number, number];
 
@@ -39,9 +39,11 @@ export type BBox = [number, number, number, number];
  * enough to move it. The map would then disagree with the ranking by a hair, silently, which is
  * the exact class of defect this project keeps getting bitten by.
  *
- * Two floats. Set only on the `opportunity` layer, which is the only one carrying scoreable cells.
+ * Three floats. Set only on the `opportunity` layer, which is the only one carrying scoreable cells.
+ * `accP95` is the accessibility scalar, shipped for the same reason as the other two — the browser
+ * re-derives the score and cannot recompute a p95 without drifting off the agent's ranking.
  */
-export type Scale = { popP95: number; supP95: number };
+export type Scale = { popP95: number; supP95: number; accP95: number };
 
 export type MapData = {
   layer: LayerId;
@@ -49,6 +51,9 @@ export type MapData = {
   rowCount: number;
   bbox?: BBox;
   scale?: Scale;
+  /** Cells in this answer with no measured catchment. Only on the `opportunity` layer.
+   *  Measured per city+category (berlin/bakery=830), never a constant. */
+  notMeasured?: number;
 } & (
   | { kind: "inline"; geojson: unknown }
   | { kind: "handle"; handle: string }
@@ -89,9 +94,10 @@ export async function emitLayer(
     rowCount: number;
     bbox?: BBox;
     scale?: Scale;
+    notMeasured?: number;
   },
 ): Promise<{ rowCount: number }> {
-  const { layer, label, geojsonText, rowCount, bbox, scale } = opts;
+  const { layer, label, geojsonText, rowCount, bbox, scale, notMeasured } = opts;
   const bytes = Buffer.byteLength(geojsonText, "utf8");
 
   if (bytes <= INLINE_BUDGET_BYTES) {
@@ -107,6 +113,7 @@ export async function emitLayer(
         rowCount,
         bbox,
         scale,
+        notMeasured,
         kind: "inline",
         geojson: JSON.parse(geojsonText),
       } satisfies MapData,
@@ -121,7 +128,7 @@ export async function emitLayer(
     chat.response.write({
       type: "data-map",
       id: layer,
-      data: { layer, label, rowCount, bbox, scale, kind: "handle", handle } satisfies MapData,
+      data: { layer, label, rowCount, bbox, scale, notMeasured, kind: "handle", handle } satisfies MapData,
     });
   }
 

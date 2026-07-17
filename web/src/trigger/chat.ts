@@ -13,6 +13,8 @@ import {
   choroplethSql,
   choroplethStatsSql,
   rankSql,
+  catchmentSql,
+  catchmentStatsSql,
   type CityName,
 } from "./scoring";
 
@@ -165,6 +167,8 @@ const scoreArea = tool({
         medianGap: number;
         popP95: number;
         supP95: number;
+        accP95: number;
+        notMeasured: number;
       }>(choroplethStatsSql(c.city, cats)),
     ]);
 
@@ -179,7 +183,11 @@ const scoreArea = tool({
       // For the browser's re-weight sliders only — never for the model (it is not in the return
       // below). These are the scalars this query actually normalised with, so the client-side
       // score lands on the agent's own ranking at neutral instead of near it. See layers.ts.
-      scale: s && s.popP95 > 0 ? { popP95: s.popP95, supP95: s.supP95 } : undefined,
+      scale:
+        s && s.popP95 > 0 ? { popP95: s.popP95, supP95: s.supP95, accP95: s.accP95 } : undefined,
+      // Only the opportunity layer carries scoreable cells, so it is the only one that reports
+      // how many of them went unmeasured (absent != 0 — the count of has_acc=0, not a zero fill).
+      notMeasured: s?.notMeasured,
     });
 
     return { cellCount: s?.cellCount ?? 0, topGap: s?.topGap ?? 0, medianGap: s?.medianGap ?? 0 };
@@ -295,7 +303,53 @@ const rankSites = tool({
   },
 });
 
-const tools = { findCompetitors, scoreArea, rankSites };
+const showCatchment = tool({
+  description:
+    "Show the real measured walk catchment around the best place to open — the area a customer can actually reach on foot in 10 minutes, following streets. Call this after rankSites.",
+  inputSchema: target,
+  execute: async ({ city, category }) => {
+    const c = checkCity(city);
+    if (!c.ok) return c.err;
+    const cats = resolveCategories(category);
+
+    // Re-derive pick #1 from the same total order rankSites ranked on, rather than taking an h3
+    // from the model. rankSql is deterministic (FR-004), so this lands on the identical cell —
+    // and an h3 threaded through the model is a hallucination surface bought for nothing (D5).
+    const picks = await queryRows<Pick>(rankSql(c.city, cats, 1));
+    if (picks.length === 0) {
+      return { error: "no populated cells for that city", city: c.city };
+    }
+    const pick = picks[0];
+
+    const [stats] = await queryRows<{ lobes: number; reachablePeople: number }>(
+      catchmentStatsSql(c.city, pick.h3),
+    );
+
+    // No walkable edge within 150 m of the cell centre ⇒ nothing routed. Emit NOTHING to the map
+    // (a drawn nothing and an undrawn nothing are different claims — US1 AS3) and hand the model a
+    // reason, not an empty success it could narrate as a catchment that isn't there.
+    if (!stats || stats.lobes === 0) {
+      return {
+        catchment: "not measured",
+        reason: "no walkable edge within 150 m of the cell centre",
+      };
+    }
+
+    const geojsonText = await queryText(catchmentSql(c.city, pick.h3));
+    await emitLayer(clickhouse, {
+      layer: "catchment",
+      label: "10-minute walk from the top pick",
+      geojsonText,
+      rowCount: stats.lobes,
+    });
+
+    // reachablePeople is the ONE number in this product the model may call a walk — Valhalla
+    // measured it. minutes/lobes ride along; the geometry stays on the map (ADR-001).
+    return { minutes: 10, reachablePeople: stats.reachablePeople, lobes: stats.lobes };
+  },
+});
+
+const tools = { findCompetitors, scoreArea, rankSites, showCatchment };
 
 /**
  * The system prompt, exported so the naming guard can be EXECUTED against a live model rather
@@ -306,7 +360,7 @@ const tools = { findCompetitors, scoreArea, rankSites };
  */
 export const SYSTEM_PROMPT = [
   "You are WhereHouse, a site-selection assistant. The map is the answer; your prose is not.",
-  "For 'where should I open X in Y', call findCompetitors, then scoreArea, then rankSites — in that order, so the map builds up as you work.",
+  "For 'where should I open X in Y', call findCompetitors, then scoreArea, then rankSites, then showCatchment — in that order, so the map builds up as you work.",
   "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",
   // ⚠️ THE CAPTION'S JOB, AND WHY THIS IS SO INSISTENT.
   //
@@ -329,10 +383,15 @@ export const SYSTEM_PROMPT = [
   // Caught on the live run that fixed the enumeration: the model wrote "zero competition within
   // walking distance". We never measured walking. `sup` counts rivals in an h3kRing(h3_8, 1) —
   // a ring of hexagons roughly 1 km across. It is *walkable*, which is why the phrase sounds
-  // right, but claiming a walk time is precision we did not earn, and this project has now been
-  // bitten three times by a plausible-sounding unearned claim. Real walk times exist (Valhalla,
-  // geo.isochrones) but are NOT wired into the score yet. When they are, delete this line.
-  "NEVER describe the competitor count as a walk, a walking distance, a catchment or a travel time. It is a count of rivals in the surrounding H3 ring — say 'nearby' or 'in the surrounding cells'. We have not measured walking.",
+  // right, but claiming a walk time of it is precision we did not earn, and this project has now
+  // been bitten three times by a plausible-sounding unearned claim.
+  //
+  // The ban NARROWED, it did not lift. Walk times are now wired for ONE number only:
+  // showCatchment's `reachablePeople`, which Valhalla measured against the real street network —
+  // that one MAY be called a 10-minute walk. `sup` never can: it is still an H3 ring, and the
+  // failure this line exists to stop was always calling the ring a walk.
+  "You may describe showCatchment's `reachablePeople` as the residents reachable within a 10-minute walk — Valhalla measured it against the street network, so it is earned.",
+  "NEVER describe the competitor count (`sup`) as a walk, a walking distance, a catchment or a travel time. It is a count of rivals in the surrounding H3 ring — say 'nearby' or 'in the surrounding cells'. We did not measure walking for it.",
   // WHY THIS IS SHAPED LIKE THIS — do not simplify it back into a flat ban.
   //
   // Day 3: the tools returned gap/population/competitor counts and NO place names, because we
