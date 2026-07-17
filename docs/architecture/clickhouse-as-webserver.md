@@ -1,6 +1,6 @@
 # ADR-003: Serving the web app *from* ClickHouse
 
-**Status:** core mechanism PROVEN on our own Cloud service; delivery shape still open
+**Status:** ACCEPTED — Cloud-only (option A), decided 2026-07-17
 **Date:** 2026-07-17
 
 ## The stunt

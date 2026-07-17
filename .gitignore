@@ -3,6 +3,7 @@
 # raw credential drops — repo goes public at submission
 *api-key*.txt
 *credentials*.json
+.secrets/
 node_modules/
 dist/
 build/

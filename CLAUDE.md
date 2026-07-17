@@ -48,6 +48,19 @@ Quick SQL check:
 curl -s --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT version()"
 ```
 
+**ClickHouse-managed Postgres** — `wherehouse-oltp`, pg18, eu-west-1, OLTP side of
+ADR-004. Credentials in `.env`. **`psql` needs the CA cert**, `sslmode=require` alone
+fails verification:
+
+```bash
+export PATH="/opt/homebrew/opt/libpq/bin:$PATH"   # psql isn't on PATH by default
+curl -s -u "$CLICKHOUSE_API_KEY_ID:$CLICKHOUSE_API_KEY_SECRET" \
+  ".../postgres/$PG_ID/caCertificates" -o .secrets/pg-ca.crt   # raw PEM, not JSON
+psql "$POSTGRES_URL&sslmode=verify-full&sslrootcert=.secrets/pg-ca.crt" -c "SELECT 1"
+```
+`.secrets/` is gitignored. ClickPipe `wherehouse-pg-cdc` replicates
+`public.{shortlists,saved_sites}` → `oltp.pg_*` every 10 s.
+
 **Trigger.dev** — `TRIGGER_SECRET_KEY` in `.env`. Project not yet initialised
 (`npx trigger.dev@latest init`).
 
@@ -96,7 +109,12 @@ Read these before writing any geo SQL. Each cost real time today.
 - [`docs/architecture/clickhouse-as-webserver.md`](docs/architecture/clickhouse-as-webserver.md) —
   **ADR-003**: the "entire service hosted on ClickHouse" stunt. **Proven on Cloud** —
   a page stored in a `MergeTree` row serves as real `text/html` over a plain GET, and
-  CORS is open so the browser queries ClickHouse directly. Delivery shape still open.
+  CORS is open so the browser queries ClickHouse directly. **Decided: Cloud-only**, with
+  a Cloudflare Worker in front purely for clean URLs, credential hiding and caching.
+- [`docs/architecture/oltp-olap.md`](docs/architecture/oltp-olap.md) —
+  **ADR-004**: ClickHouse-managed Postgres → ClickPipes CDC → ClickHouse. **Built and
+  verified** (~20 s end-to-end). Targets the OLTP+OLAP bonus prize. The point is the
+  join: a user's saved site (seconds old, from Postgres) against 75M Overture POIs.
 
 ## Key facts worth not re-deriving
 
