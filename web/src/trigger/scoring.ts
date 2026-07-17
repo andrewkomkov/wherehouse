@@ -97,17 +97,26 @@ function candidateCells(city: CityName, categories: string[]): string {
     SELECT cell, pop, sup,
       least(100, 100 * pop / pop_p95)                                     AS demand_n,
       least(100, 100 * sup / sup_p95)                                     AS supply_n,
-      demand_n * (100 - supply_n) / 100                                   AS gap
+      demand_n * (100 - supply_n) / 100                                   AS gap,
+      -- Carried through so choroplethStatsSql can hand the two scalars to the browser, which
+      -- re-derives this same score for the re-weight sliders. It must not guess them: a p95
+      -- recomputed client-side is a different p95, and the map would drift off the ranking the
+      -- agent just gave. See the Scale type in layers.ts.
+      -- (No backticks in here — this string is a JS template literal and one would close it.)
+      pop_p95, sup_p95
     FROM joined, scale
   )`;
 }
 
 /**
  * Total order. The p95 clamp legitimately ties cells at the ceiling (measured: three Berlin
- * cells at exactly 100.0), so without the `cell` tiebreak the "top 3" could reorder between
- * two runs of the same question. (FR-004)
+ * cells at exactly 100.0 — the bakery top-3 is *entirely* ties), so without the `cell` tiebreak
+ * the "top 3" could reorder between two runs of the same question. (FR-004)
+ *
+ * Qualified with the `s.` alias because rankSql now LEFT JOINs geo.districts, and `gap`/`pop`
+ * would otherwise be ambiguous.
  */
-const DETERMINISTIC_ORDER = "ORDER BY gap DESC, pop DESC, cell ASC";
+const DETERMINISTIC_ORDER = "ORDER BY s.gap DESC, s.pop DESC, s.cell ASC";
 
 /**
  * The opportunity choropleth as one GeoJSON string, assembled in SQL.
@@ -136,28 +145,63 @@ export function choroplethSql(city: CityName, categories: string[]): string {
   FROM scored`;
 }
 
-/** Cheap stats for the model — never geometry (ADR-001). */
+/**
+ * Cheap stats for the model — never geometry (ADR-001).
+ *
+ * `popP95`/`supP95` are NOT for the model; they ride out to the browser on the layer part so the
+ * sliders can re-derive this exact score without a round-trip (layers.ts `Scale`). `any()` is
+ * correct rather than lazy: both are constants of the `scale` CTE, identical on every row.
+ */
 export function choroplethStatsSql(city: CityName, categories: string[]): string {
   return `WITH ${candidateCells(city, categories)}
   SELECT count() AS cellCount,
          round(max(gap), 1) AS topGap,
-         round(median(gap), 1) AS medianGap
+         round(median(gap), 1) AS medianGap,
+         any(pop_p95) AS popP95,
+         any(sup_p95) AS supP95
   FROM scored`;
 }
 
 /**
  * The top N picks. Each carries the population and competitor count that produced its score,
- * so a sceptic can recompute the ranking by hand (FR-003).
+ * so a sceptic can recompute the ranking by hand (FR-003) — and now the district name it sits
+ * in, so the agent can say "Lichtenrade" without guessing.
+ *
+ * The LEFT JOIN is the whole fix for day 3's worst bug. Without names in this result the model
+ * still wanted to name a place, so it invented one — it put all three Berlin picks in "Spandau",
+ * the wrong side of the city. The join is on `h3_8` equality against a table precomputed by
+ * infra/load-districts.sh; no geometry runs at request time.
+ *
+ * **LEFT, and `''` means no name.** Not every cell resolves. Measured coverage 2026-07-20,
+ * % of populated cells:
+ *
+ *     city        locality   area
+ *     berlin         98.3    56.8     (its bbox reaches into Brandenburg, where `area` stops)
+ *     amsterdam     100.0    47.8
+ *     belgrade      100.0     3.9     (Overture has 3 macrohoods for the whole bbox)
+ *
+ * So `area = ''` is the NORMAL case in Belgrade, not an edge case — see placeName() in chat.ts,
+ * which is the single place that decides what an absent name means. An unresolved cell yields
+ * `''` and the agent then says nothing — never the nearest district. An INNER JOIN here would
+ * silently drop the best cell in Brandenburg from the ranking, a worse lie than saying less.
+ *
+ * `area`/`locality` are Overture's tiers, not Berlin's: `locality` is a Bezirk inside Berlin but
+ * a Gemeinde in Brandenburg, a municipality in NL and a village in RS. Naming these columns
+ * `ortsteil`/`bezirk` (the first cut) encoded a Berlin assumption as universal — the same defect
+ * class this whole table exists to fix. See db/clickhouse/005_districts_schema.sql.
  */
 export function rankSql(city: CityName, categories: string[], limit = 3): string {
   return `WITH ${candidateCells(city, categories)}
-  SELECT h3ToString(cell)          AS h3,
-         round(gap, 1)             AS gap,
-         round(pop)                AS pop,
-         sup                       AS sup,
-         round(h3ToGeo(cell).2, 5) AS lon,
-         round(h3ToGeo(cell).1, 5) AS lat
-  FROM scored
+  SELECT h3ToString(s.cell)          AS h3,
+         round(s.gap, 1)             AS gap,
+         round(s.pop)                AS pop,
+         s.sup                       AS sup,
+         round(h3ToGeo(s.cell).2, 5) AS lon,
+         round(h3ToGeo(s.cell).1, 5) AS lat,
+         d.area                      AS area,
+         d.locality                  AS locality
+  FROM scored AS s
+  LEFT JOIN geo.districts AS d ON s.cell = d.h3_8 AND d.city = '${city}'
   ${DETERMINISTIC_ORDER}
   LIMIT ${limit}`;
 }

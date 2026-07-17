@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "trigger:dev": "trigger dev"
+    "trigger:dev": "trigger dev",
+    "verify:score": "node scripts/verify-score.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^2",

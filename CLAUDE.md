@@ -21,8 +21,18 @@ plus live verification against our own ClickHouse service.
 ```
 
 Everything is in `.env` (gitignored): ClickHouse, the public read-only `site` user,
-the Cloud API key, managed Postgres, Trigger.dev. `.secrets/pg-ca.crt` holds the Postgres
-CA. **`ANTHROPIC_API_KEY` is not set yet** — `chat.agent()` needs it.
+the Cloud API key, managed Postgres, Trigger.dev. `.secrets/pg-ca.crt` holds the Postgres CA.
+
+`ANTHROPIC_API_KEY` **is set** and points at DeepSeek via `ANTHROPIC_BASE_URL`
+(`deepseek-v4-flash` — DeepSeek speaks the Anthropic wire format, so `@ai-sdk/anthropic` works
+unchanged; drop `ANTHROPIC_BASE_URL` to fall back to Anthropic proper). `check-env.sh` proves
+the model responds and prints the balance — **watch it: $4.87 on 19 July.** Enough for a day of
+iteration, not a week of demos, and the video is due on the 22nd.
+
+*(This line said "not set yet" until 20 July, long after it was set. A day-4 agent read that,
+believed it, and reported a live check as impossible — the exact failure principle II names,
+committed against our own stale doc rather than a vendor's. Stale docs lie like state fields
+do.)*
 
 Two traps this script exists to catch:
 - **`POSTGRES_URL` must stay quoted in `.env`** — an unquoted `&` aborts `source .env` and

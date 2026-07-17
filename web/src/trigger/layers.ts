@@ -29,11 +29,26 @@ export type LayerId = "competitors" | "opportunity" | "picks";
 
 export type BBox = [number, number, number, number];
 
+/**
+ * The p95 scalars ClickHouse used to normalise demand and supply for THIS query.
+ *
+ * Sent because the browser re-derives the score client-side for the re-weight sliders, and it
+ * must arrive at the number the agent already ranked on. It cannot recompute these: scoring.ts
+ * derives them per city and category at query time (FR-007/FR-010), and a p95 recomputed in JS
+ * is a *different* p95 — a different interpolation rule between the two straddling samples is
+ * enough to move it. The map would then disagree with the ranking by a hair, silently, which is
+ * the exact class of defect this project keeps getting bitten by.
+ *
+ * Two floats. Set only on the `opportunity` layer, which is the only one carrying scoreable cells.
+ */
+export type Scale = { popP95: number; supP95: number };
+
 export type MapData = {
   layer: LayerId;
   label: string;
   rowCount: number;
   bbox?: BBox;
+  scale?: Scale;
 } & (
   | { kind: "inline"; geojson: unknown }
   | { kind: "handle"; handle: string }
@@ -73,9 +88,10 @@ export async function emitLayer(
     geojsonText: string;
     rowCount: number;
     bbox?: BBox;
+    scale?: Scale;
   },
 ): Promise<{ rowCount: number }> {
-  const { layer, label, geojsonText, rowCount, bbox } = opts;
+  const { layer, label, geojsonText, rowCount, bbox, scale } = opts;
   const bytes = Buffer.byteLength(geojsonText, "utf8");
 
   if (bytes <= INLINE_BUDGET_BYTES) {
@@ -90,6 +106,7 @@ export async function emitLayer(
         label,
         rowCount,
         bbox,
+        scale,
         kind: "inline",
         geojson: JSON.parse(geojsonText),
       } satisfies MapData,
@@ -104,7 +121,7 @@ export async function emitLayer(
     chat.response.write({
       type: "data-map",
       id: layer,
-      data: { layer, label, rowCount, bbox, kind: "handle", handle } satisfies MapData,
+      data: { layer, label, rowCount, bbox, scale, kind: "handle", handle } satisfies MapData,
     });
   }
 

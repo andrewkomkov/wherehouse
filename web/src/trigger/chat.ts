@@ -159,9 +159,13 @@ const scoreArea = tool({
 
     const [geojsonText, stats] = await Promise.all([
       queryText(choroplethSql(c.city, cats)),
-      queryRows<{ cellCount: number; topGap: number; medianGap: number }>(
-        choroplethStatsSql(c.city, cats),
-      ),
+      queryRows<{
+        cellCount: number;
+        topGap: number;
+        medianGap: number;
+        popP95: number;
+        supP95: number;
+      }>(choroplethStatsSql(c.city, cats)),
     ]);
 
     const s = stats[0];
@@ -172,13 +176,66 @@ const scoreArea = tool({
       label: `opportunity for ${category} across ${c.city}`,
       geojsonText,
       rowCount: s?.cellCount ?? 0,
+      // For the browser's re-weight sliders only — never for the model (it is not in the return
+      // below). These are the scalars this query actually normalised with, so the client-side
+      // score lands on the agent's own ranking at neutral instead of near it. See layers.ts.
+      scale: s && s.popP95 > 0 ? { popP95: s.popP95, supP95: s.supP95 } : undefined,
     });
 
     return { cellCount: s?.cellCount ?? 0, topGap: s?.topGap ?? 0, medianGap: s?.medianGap ?? 0 };
   },
 });
 
-type Pick = { h3: string; gap: number; pop: number; sup: number; lon: number; lat: number };
+type Pick = {
+  h3: string;
+  gap: number;
+  pop: number;
+  sup: number;
+  lon: number;
+  lat: number;
+  /**
+   * The two name tiers from geo.districts, resolved by point-in-polygon against Overture
+   * divisions at load time — see db/clickhouse/005_districts_schema.sql.
+   *
+   * Named after what Overture means, NOT after Berlin: `locality` is a Bezirk inside Berlin but
+   * a Gemeinde in Brandenburg, a municipality in NL and a village in RS. `area` is the finer tier
+   * (Berlin Ortsteil, Amsterdam stadsdeel) and has no equivalent in most of Belgrade.
+   *
+   * **`''` means we have no name for that cell.** Measured coverage 2026-07-20 — locality
+   * 98.3/100/100 %, area 56.8/47.8/**3.9** % for berlin/amsterdam/belgrade. So in Belgrade
+   * `area` is almost always empty and locality-only is the normal answer, not a broken one.
+   * Empty must stay empty all the way to the model and the popup; `placeName` below is the only
+   * place that decides what to do with it.
+   */
+  area: string;
+  locality: string;
+};
+
+/**
+ * The one function allowed to turn a pick into a place name.
+ *
+ * Returns `undefined` rather than a fallback when nothing resolved. That is the entire point of
+ * the day-3 fix: an unnamed cell produces NO name, never the nearest district. `undefined` drops
+ * the key from the JSON the model sees and from the GeoJSON properties, so a missing name is
+ * invisible rather than empty-stringy — the model cannot mistake `""` for a name it should fill in.
+ *
+ * Exported only so this rule can be executed directly rather than re-implemented in a check: a
+ * check that reimplements the logic it is checking verifies the reimplementation, not the code
+ * that ships (constitution II).
+ */
+export function placeName(p: Pick): string | undefined {
+  const parts = [p.area, p.locality].filter((n) => n !== "");
+  // Both present and different ⇒ "Lichtenrade, Tempelhof-Schöneberg". Either alone is still a
+  // true statement — and locality-alone is the NORMAL Belgrade answer ("Zvezdara"), because
+  // Overture has 3 macrohoods for that whole bbox. That path is the common one, not a fallback.
+  //
+  // The dedup is not defensive coding — an area is legitimately named the same as its parent
+  // locality, and it is common: measured 2026-07-20, area = locality in 82 Berlin cells
+  // (Neukölln is both an Ortsteil and the Bezirk containing it), 26 Amsterdam cells (Weesp) and
+  // 2 in Belgrade. Without this, those cells would render "Neukölln, Neukölln".
+  const uniq = [...new Set(parts)];
+  return uniq.length > 0 ? uniq.join(", ") : undefined;
+}
 
 const rankSites = tool({
   description:
@@ -199,7 +256,17 @@ const rankSites = tool({
       features: picks.map((p, i) => ({
         type: "Feature",
         geometry: { type: "Point", coordinates: [p.lon, p.lat] },
-        properties: { rank: i + 1, gap: p.gap, pop: p.pop, sup: p.sup, h3: p.h3 },
+        // `place` is what the popup shows as its heading. Undefined when the cell resolved to no
+        // district — JSON.stringify drops the key entirely, so the popup renders without a
+        // heading rather than with an empty one.
+        properties: {
+          rank: i + 1,
+          gap: p.gap,
+          pop: p.pop,
+          sup: p.sup,
+          h3: p.h3,
+          place: placeName(p),
+        },
       })),
     };
 
@@ -212,9 +279,14 @@ const rankSites = tool({
 
     // The one tool whose result the model may legitimately mention: FR-003 wants the user to
     // see the numbers behind each pick. Even so the MAP carries them — this is the garnish.
+    //
+    // `place` is the only place name the model is ever allowed to utter, and it is only here
+    // because a point-in-polygon test put the cell inside that polygon. Where it is absent the
+    // key is absent — the model has nothing to relay and the prompt forbids inventing one.
     return {
       picks: picks.map((p, i) => ({
         rank: i + 1,
+        place: placeName(p),
         gap: p.gap,
         population: p.pop,
         competitorsNearby: p.sup,
@@ -224,6 +296,86 @@ const rankSites = tool({
 });
 
 const tools = { findCompetitors, scoreArea, rankSites };
+
+/**
+ * The system prompt, exported so the naming guard can be EXECUTED against a live model rather
+ * than asserted in a comment.
+ *
+ * This block is the whole day-3 fix and it is shaped deliberately — do not flatten it back into
+ * a blanket ban, and do not soften it into "prefer not to guess".
+ */
+export const SYSTEM_PROMPT = [
+  "You are WhereHouse, a site-selection assistant. The map is the answer; your prose is not.",
+  "For 'where should I open X in Y', call findCompetitors, then scoreArea, then rankSites — in that order, so the map builds up as you work.",
+  "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",
+  // ⚠️ THE CAPTION'S JOB, AND WHY THIS IS SO INSISTENT.
+  //
+  // The rail already renders every pick as a row: rank, score, place, population, competitors.
+  // The map already renders where they are. So a caption that recites "Lichtenrade (6,826
+  // people, no nearby bakeries), Biesdorf (6,807…), Mahlsdorf (5,860…)" adds NOTHING — it is
+  // the Top picks panel, retyped, in the one medium the hackathon's theme calls a defect.
+  // That is exactly what shipped on the first live run of the design (20 July).
+  //
+  // The cause was a conflict in this prompt, not the model misbehaving: "never enumerate" sat
+  // next to "describe the picks by population and competitor counts", and the model resolved
+  // it toward the list. Both halves are below now, but the second is explicitly scoped to the
+  // no-name case only.
+  //
+  // Test for the caption: could a reader get this from the shapes alone? If yes, it is furniture.
+  "Never list or describe coordinates.",
+  "NEVER enumerate the picks. Do not write their names, scores, populations or competitor counts as a list — every one of those is already on screen, in the panel and on the map, and repeating them is the wall of text this product exists to replace.",
+  "Your two sentences must say what the MAP CANNOT: the pattern behind the answer. What do the winners have in common, and what does the competitor layer show — where is the trade clustered, and why is that leaving a gap? Name at most one place, and only if it carries the point.",
+  "Good: 'Berlin's bakeries crowd the centre, so the openings are all on the outer residential edge — thousands of residents each, and no rival in the surrounding cells.' Bad: any sentence that reads like a table.",
+  // Caught on the live run that fixed the enumeration: the model wrote "zero competition within
+  // walking distance". We never measured walking. `sup` counts rivals in an h3kRing(h3_8, 1) —
+  // a ring of hexagons roughly 1 km across. It is *walkable*, which is why the phrase sounds
+  // right, but claiming a walk time is precision we did not earn, and this project has now been
+  // bitten three times by a plausible-sounding unearned claim. Real walk times exist (Valhalla,
+  // geo.isochrones) but are NOT wired into the score yet. When they are, delete this line.
+  "NEVER describe the competitor count as a walk, a walking distance, a catchment or a travel time. It is a count of rivals in the surrounding H3 ring — say 'nearby' or 'in the surrounding cells'. We have not measured walking.",
+  // WHY THIS IS SHAPED LIKE THIS — do not simplify it back into a flat ban.
+  //
+  // Day 3: the tools returned gap/population/competitor counts and NO place names, because we
+  // held no boundary geometry. Asked where to open a bakery, the model still wanted to name the
+  // areas — so it invented names that sounded right, placing all three Berlin picks in
+  // "Spandau", the opposite side of the city. The map was right and the sentence was a lie,
+  // which is worse than saying less. We banned naming outright as a stopgap, at the cost of the
+  // answer: "an underserved area" is a much weaker line than "Lichtenrade".
+  //
+  // geo.districts (db/clickhouse/005_districts_schema.sql) removes the REASON for the ban rather
+  // than the ban itself. rankSites now carries `place` per pick, resolved by point-in-polygon
+  // against Overture divisions — so the ban narrows from "never name a place" to "never name a
+  // place a tool did not give you". That distinction is the entire safety property: the failure
+  // mode was never *naming*, it was naming without evidence.
+  //
+  // ⚠️ THE INVARIANT, AND IT IS NOT THE OLD ONE. Day 3's rule was "a place name in the answer =
+  // the guard regressed". That is now FALSE and believing it will make you chase a non-bug:
+  // place names in the answer are the intended outcome — "Lichtenrade" is the whole point.
+  //
+  //     The guard has regressed iff the answer contains a place name that NO TOOL RETURNED.
+  //
+  // So the check is a diff against the tool payload, not a search for capitalised words. If you
+  // are auditing a transcript: pull the `place` values out of the rankSites result and confirm
+  // every name in the prose is one of them. Anything else — however plausible, however real a
+  // district it happens to be — is the day-3 bug back.
+  //
+  // On `place` being absent, stated precisely because the imprecise version is exactly the bug
+  // this file is about: measured 2026-07-20, **every** populated cell in all three cities
+  // resolves to at least a locality, so in practice `place` is currently always present. What is
+  // often absent is the finer tier (Belgrade `area` is 3.9%) — but placeName() then returns the
+  // locality alone ("Zvezdara"), so the model still gets a name. The absent-`place` path is a
+  // contract the code guarantees, not a case the demo exercises. The clause stays anyway: it
+  // must hold the day a cell falls outside every polygon, and that day must not be the day we
+  // find out the model improvises.
+  "You may name a place ONLY by repeating a `place` value that a tool returned to you in this conversation. Those are resolved from real boundary geometry, so they are safe to say.",
+  "NEVER invent, guess, infer or complete a place name from coordinates, from a map, or from your own knowledge of the city. If a pick has no `place`, it has no name: describe it by its population and nearby competitor count instead, and never substitute a nearby or plausible-sounding district.",
+  "A `place` may be a single name rather than two — that is complete, not truncated. Repeat it exactly as given; never expand it, translate it, or add the city, region or country around it.",
+  // Scoped to the no-name case ONLY. Unscoped, this line reads as an invitation to recite the
+  // numbers and it defeats the no-enumeration rule above — which is precisely what it did.
+  "When a pick has no `place`, and only then, you may fall back to describing it by what the tools returned — its population and nearby competitor count — instead of a name.",
+  "The score is a ranking heuristic over real data, not a measurement. Do not overstate it.",
+  "If a tool returns an error, say plainly what is unavailable. Never pretend a map was drawn.",
+].join(" ");
 
 export type WhereHouseUIMessage = UIMessage<
   unknown,
@@ -244,21 +396,9 @@ export const whereHouseChat = chat
         // injection). Omitting it makes those silently no-op.
         ...chat.toStreamTextOptions({ tools }),
         model,
-        system: [
-          "You are WhereHouse, a site-selection assistant. The map is the answer; your prose is not.",
-          "For 'where should I open X in Y', call findCompetitors, then scoreArea, then rankSites — in that order, so the map builds up as you work.",
-          "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",
-          "Never list or describe coordinates. Never enumerate the picks in prose — they are already pinned on the map.",
-          // The tools return gap/population/competitor counts and NO place names, because we
-          // hold no district geometry. Asked to name an area, the model will invent one that
-          // sounds right: on the first live run it confidently placed all three Berlin picks
-          // in "Spandau" — the opposite side of the city from where they actually are. The
-          // map was right and the sentence was a lie, which is worse than saying less.
-          "NEVER name a district, neighbourhood or street. You do not know them: no tool gives you place names, and guessing from coordinates produces confident falsehoods.",
-          "Describe the picks only by what the tools actually returned — population and nearby competitor counts.",
-          "The score is a ranking heuristic over real data, not a measurement. Do not overstate it.",
-          "If a tool returns an error, say plainly what is unavailable. Never pretend a map was drawn.",
-        ].join(" "),
+        // The prompt lives in SYSTEM_PROMPT so that the guard it encodes can be run against a
+        // live model. A prompt that is only asserted in a comment is not verified (constitution II).
+        system: SYSTEM_PROMPT,
         messages,
         abortSignal: signal,
         stopWhen: stepCountIs(8),

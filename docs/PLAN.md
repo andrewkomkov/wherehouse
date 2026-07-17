@@ -147,8 +147,18 @@ residential, zero bakeries in the ring, and notably *not* the commercial centre.
    point takes a bbox prefilter + `pointInPolygon`, sub-second. Precompute `h3_8 → name` into a
    small table and `rankSites` joins on equality — no runtime geometry. Then the naming ban can
    be lifted honestly, and "Lichtenrade" is a far better demo line than "an underserved area".
-2. **The map does not survive a page reload** — ADR-001 assumed it did; it doesn't. Cut, with
-   reasons, in the spec's Out of Scope.
+2. ~~**The map does not survive a page reload**~~ — **this finding is WRONG and the cut was my
+   error.** The v4.5.0 changelog says `chat.agent()` conversations survive *"page refreshes,
+   client disconnects, redeploys, idle timeouts, and crashes"*, and the SDK ships `sessions.open()`
+   plus `sessions`/`onSessionChange` hydration for exactly this.
+
+   My test never persisted the `chatId`, so `useChat` minted a fresh one on mount. I proved
+   **a new session is empty** — trivially true — and concluded about **resuming an old one**,
+   which I never exercised. Same defect as the district names: verify the adjacent thing,
+   conclude about the target. Third time in two days.
+
+   **To do (day 5, cheap):** persist `chatId`, hydrate `sessions`, re-test honestly. Then either
+   restore US1 scenario 4 or cut it for a *reason that survives contact with a test*.
 3. `h3ToGeo` and `h3ToGeoBoundary` are **lat-first** like `geoToH3`. A swapped bbox returns
    zero rows with **no error**. Now in `CLAUDE.md`.
 
@@ -223,7 +233,17 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
   *"would this work in production?"* half of Technical Implementation (20%). Only after the
   skeleton — see decision note.
 - **Progressive choreography** — the wave sequence from ADR-001, wired for real.
-- **Design integration** — whatever came back from the designer.
+- **Design integration** — the comp landed 20 July (claude.ai/design, `WhereHouse.dc.html`).
+  Map-dominant with a floating instrument rail; dark `#0a0c0f`; IBM Plex; teal `#6ff0e0`
+  accent with `#FAFF69` spent **only** on the #1 pick; a visible 7-wave **Assembly timeline**
+  that names each wave's source (ClickHouse / Valhalla / agent).
+  **What we refuse to port**: the comp's four re-weight sliders run on synthetic Gaussians.
+  *Low rent* has **no data source at all** and is cut; *Footfall* is renamed **Residents**,
+  because Kontur counts people who live in a cell and calling that foot traffic is a
+  plausible-sounding falsehood; *Accessibility* waits on real isochrones. The
+  `CATCHMENT · MEASURED` chip may only appear once a real Valhalla polygon is on screen.
+- **`chat.headStart`** (v4.5.0): time-to-first-chunk 2.8 s → 1.2 s. Cheap, and it is the demo
+  video's opening beat. Not yet wired.
 - **OLTP surfacing**: "your saved sites vs the market" as a real chat answer (bonus prize).
 
 ---
@@ -366,7 +386,7 @@ same container, used for the *batch*, is a different question with a different a
 | ~~`chat.agent()` doesn't behave as documented~~ | ~~critical~~ → **RETIRED 18 Jul** | skeleton ran it end to end; behaves as documented |
 | ~~Progressive in-place update doesn't work~~ | ~~high~~ → **RETIRED 18 Jul** | proven live: `parts=1` across two writes to one id, content changed |
 | ~~**1 MiB per-record cap kills a wide layer mid-demo**~~ | ~~high~~ → **RETIRED 19 Jul** | handle path live: an over-budget layer never touches the stream. Proven on the 549 KiB choropleth and a 781 KiB competitor layer, both fetched by the browser straight from ClickHouse |
-| **The model states things it cannot know** | **medium** — new, found day 3 | it placed all three Berlin picks in "Spandau" on the first live run. Tools return no place names; the prompt now forbids naming districts. A place name in the answer = the guard regressed |
+| ~~**The model states things it cannot know**~~ | ~~medium~~ → **RETIRED 20 Jul** | `geo.districts` gives the tools real names (Overture divisions), so the ban is lifted for names a tool returned. **The invariant inverted**: a place name is now the intended outcome; the regression signal is *a name no tool returned*, i.e. a diff against the `rankSites` payload — not a search for capitalised words. Verified live 3×, `place` absent and the user pushing "name the neighbourhoods": zero inventions, it refuses. |
 | **DeepSeek balance is $4.87** | medium | a day of iteration, not a week. `check-env.sh` reports it; drop `ANTHROPIC_BASE_URL` to fall back to real Anthropic |
 | Designer doesn't deliver in time | medium | brief is out day 1; ship functional-but-plain, style later |
 | Cloud reaches 26.6 (or doesn't) | low | assume it doesn't; nothing depends on it |
