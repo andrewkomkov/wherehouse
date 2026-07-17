@@ -18,6 +18,7 @@ import {
   catchmentStatsSql,
   savedSitesRowsSql,
   savedSitesGeoJsonSql,
+  affinityForCellsSql,
   type CityName,
 } from "./scoring";
 
@@ -262,23 +263,48 @@ const rankSites = tool({
       return { error: "no populated cells for that city", city: c.city };
     }
 
+    // EDITORIAL neighbourhood-fit for the picks — a labelled heuristic, NEVER the measured GAP
+    // rank (that stays demand × (100 − supply) × accessibility; the picks are already ordered).
+    // `cats[0]` is the primary trade: cats === resolveCategories(category), and a GROUP with no
+    // single target (e.g. "food and drink") falls back to its first category, per the dict's own
+    // fallback contract in db/clickhouse/007_affinity.sql.
+    const resolvedTarget = cats[0];
+    const affinity = await queryRows<{ h3: string; fit: number; topNeighbours: string }>(
+      affinityForCellsSql(c.city, resolvedTarget, picks.map((p) => p.h3)),
+    );
+    // absent != 0: a pick whose ring holds no complementary trade comes back fit 0 / '[]'. We key
+    // presence on a NON-EMPTY neighbour list, so such a pick gets NO fit keys at all — the UI and
+    // the model then render "none nearby", never a measured "fit = 0" (FR-006).
+    const affinityByH3 = new Map(
+      affinity.map((a) => {
+        const neighbours = JSON.parse(a.topNeighbours) as { category: string; n: number; w: number }[];
+        return [a.h3, { fit: a.fit, neighbours }];
+      }),
+    );
+
     const geojson = {
       type: "FeatureCollection",
-      features: picks.map((p, i) => ({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [p.lon, p.lat] },
-        // `place` is what the popup shows as its heading. Undefined when the cell resolved to no
-        // district — JSON.stringify drops the key entirely, so the popup renders without a
-        // heading rather than with an empty one.
-        properties: {
-          rank: i + 1,
-          gap: p.gap,
-          pop: p.pop,
-          sup: p.sup,
-          h3: p.h3,
-          place: placeName(p),
-        },
-      })),
+      features: picks.map((p, i) => {
+        const a = affinityByH3.get(p.h3);
+        const hasFit = a != null && a.neighbours.length > 0;
+        return {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+          // `place` is what the popup shows as its heading. Undefined when the cell resolved to no
+          // district — JSON.stringify drops the key entirely, so the popup renders without a
+          // heading rather than with an empty one. `fit`/`topNeighbours` are the EDITORIAL signal
+          // for the client to render (labelled editorial there); omitted when none nearby.
+          properties: {
+            rank: i + 1,
+            gap: p.gap,
+            pop: p.pop,
+            sup: p.sup,
+            h3: p.h3,
+            place: placeName(p),
+            ...(hasFit ? { fit: a.fit, topNeighbours: a.neighbours } : {}),
+          },
+        };
+      }),
     };
 
     await emitLayer(clickhouse, {
@@ -295,13 +321,27 @@ const rankSites = tool({
     // because a point-in-polygon test put the cell inside that polygon. Where it is absent the
     // key is absent — the model has nothing to relay and the prompt forbids inventing one.
     return {
-      picks: picks.map((p, i) => ({
-        rank: i + 1,
-        place: placeName(p),
-        gap: p.gap,
-        population: p.pop,
-        competitorsNearby: p.sup,
-      })),
+      picks: picks.map((p, i) => {
+        const a = affinityByH3.get(p.h3);
+        const hasFit = a != null && a.neighbours.length > 0;
+        return {
+          rank: i + 1,
+          place: placeName(p),
+          gap: p.gap,
+          population: p.pop,
+          competitorsNearby: p.sup,
+          // EDITORIAL, not measured, and NOT part of the score — the model MAY relay these as a
+          // complementary aside (see SYSTEM_PROMPT). Omitted when no complementary trade is
+          // nearby, so the model has nothing to relay and cannot narrate an absence as "fit 0".
+          //
+          // The model gets the trade NAMES only, never the raw `fit` number. The number is an
+          // editorial heuristic that reads like a score; handing it to the model invites it to
+          // quote "neighbourhood fit 10.8" as if it were measured — the FR-004 failure. The UI
+          // shows the number behind an explicit "editorial" tag; the model, which has no such
+          // affordance, never sees it. `fit` stays in the picks GeoJSON properties for the UI.
+          ...(hasFit ? { complementaryNearby: a.neighbours.map((nb) => nb.category) } : {}),
+        };
+      }),
     };
   },
 });
@@ -555,6 +595,13 @@ export const SYSTEM_PROMPT = [
   // their payload is safe. Inventing a save, a label or a score is the day-3 bug in a new place.
   "When the user asks to save, keep or shortlist a pick, call saveSite; when they ask how their saved or kept sites compare, call compareSavedSites.",
   "You may relay a saved site's label and its market comparison ONLY from the saveSite/compareSavedSites payload. Never invent a saved site, a label or a score, never claim a save or a comparison a tool did not return, and when a saved site's marketGap is absent say it is unscored — never 0.",
+  // Feature 005, the editorial affinity signal. rankSites may attach `complementaryNearby` to a
+  // pick — the complementary trades it already sits near. This is a HAND-AUTHORED EDITORIAL
+  // heuristic (our opinion of good neighbours), not a measurement and NOT part of the GAP score
+  // that ordered the picks. The evidence discipline is the same as everywhere else: the model may
+  // relay only trades a tool actually returned. Absent `complementaryNearby` means none nearby —
+  // omitted so the model cannot narrate an absence as a measured "fit 0".
+  "A pick may carry `complementaryNearby`: the complementary trades already near it. You MAY add this as ONE brief editorial aside (e.g. 'a supermarket and school next door — good bakery neighbours'), but you MUST frame it as complementary/editorial, MUST NOT present it as measured or as a reason the pick ranked, and MUST NOT name a trade that is not in that pick's `complementaryNearby` list. When a pick has no `complementaryNearby`, say nothing about its neighbours — never that it has none as a fact.",
   "The score is a ranking heuristic over real data, not a measurement. Do not overstate it.",
   "If a tool returns an error, say plainly what is unavailable. Never pretend a map was drawn.",
 ].join(" ");

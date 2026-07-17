@@ -243,6 +243,67 @@ export function rankSql(city: CityName, categories: string[], limit = 3): string
 }
 
 /**
+ * Neighbourhood-fit for a handful of picks — an EDITORIAL heuristic, never a measurement.
+ *
+ * ⚠️ This does NOT touch the GAP ranking. GAP stays demand × (100 − supply) × accessibility
+ * (candidateCells above); affinity is a SEPARATE, labelled signal shown next to a pick. `weight`
+ * is a hand-authored opinion of how much a nearby trade complements `target` (see
+ * db/clickhouse/007_affinity.sql). If it ever multiplied into `gap`, an opinion would be
+ * laundered into a measurement — the exact failure constitution II names. Keep it out.
+ *
+ * `target` is the already-resolved category string (the caller maps the user's word via
+ * CATEGORY_SYNONYMS in chat.ts; a group with no single target falls back to 'restaurant'). Per
+ * pick it returns:
+ *   - `fit`: sum over the pick's h3kRing(1) of dictGetFloat32(affinity, (target, place.category))
+ *     across the city's places — a footfall-proxy raw sum, deliberately un-normalised (spec.md).
+ *   - `topNeighbours`: a JSON array string of the top 3 complementary trades actually present in
+ *     the ring, by summed weight, `[{"category","n","w"}]` — only categories with weight > 0.
+ *
+ * absent != 0: a pick whose ring holds no complementary trade still returns a row (LEFT JOIN from
+ * the picks), with `fit` 0 and `topNeighbours` '[]'. That is "we found none nearby", which the
+ * caller must render as those words — never as a measured "fit = 0" fact (FR-006).
+ *
+ * Measured live 2026-07-17 (Cloud 26.4), berlin / bakery, the three real top-3 picks:
+ *   881f18b021fffff  fit 10.8  [supermarket ×8, elementary_school ×3, pharmacy ×4]
+ *   881f1d4d81fffff  fit  6.2  [supermarket ×6, park ×2, elementary_school ×1]
+ *   881f18b563fffff  fit  3.3  [elementary_school ×2, supermarket ×2, coffee_shop ×1]
+ */
+export function affinityForCellsSql(
+  city: CityName,
+  category: string,
+  h3Strings: string[],
+): string {
+  const c = city.replace(/'/g, "''");
+  const target = category.replace(/'/g, "''");
+  const picks = h3Strings.map((h) => `stringToH3('${h.replace(/'/g, "''")}')`).join(", ");
+
+  return `WITH
+  picks AS (SELECT arrayJoin([${picks}]) AS pick),
+  per_cat AS (
+    SELECT r.pick AS pick, pl.category AS category, count() AS n,
+           dictGetFloat32('geo.affinity_dict', 'weight', ('${target}', pl.category)) AS w
+    FROM (SELECT pick, arrayJoin(h3kRing(pick, 1)) AS cell FROM picks) r
+    INNER JOIN geo.places pl ON pl.h3_8 = r.cell AND pl.city = '${c}'
+    GROUP BY r.pick, pl.category
+  )
+  SELECT h3ToString(pk.pick)      AS h3,
+         round(sum(pc.n * pc.w), 2) AS fit,
+         -- Top 3 complementary trades in the ring, by summed weight (n × w), weight > 0 only.
+         -- Built by hand (Cloud 26.4 has no GeoJSON/JSON format); the LEFT-JOIN filler row for a
+         -- pick with no matches has w = 0 ⇒ excluded ⇒ '[]', the absent-≠-0 rendering (FR-006).
+         concat('[', arrayStringConcat(arrayMap(
+           e -> concat('{"category":', toJSONString(e.1),
+                       ',"n":', toString(e.2),
+                       ',"w":', toString(round(e.3, 2)), '}'),
+           arraySlice(arrayReverseSort(e -> e.2 * e.3, groupArrayIf((pc.category, pc.n, pc.w), pc.w > 0)), 1, 3)
+         ), ','), ']')            AS topNeighbours
+  FROM picks pk
+  LEFT JOIN per_cat pc ON pc.pick = pk.pick
+  GROUP BY pk.pick
+  ORDER BY fit DESC, pk.pick`;
+}
+
+/**
  * Competitor points as one GeoJSON string.
  *
  * Measured, Berlin bakeries: 1,460 rows · 430 ms · 175 KiB ⇒ inline. Berlin food & drink is

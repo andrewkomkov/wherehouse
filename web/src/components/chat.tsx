@@ -1219,6 +1219,49 @@ export function Chat() {
                     <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
                       {score} / 100 · ~{Number(p.pop).toLocaleString("en")} people · {p.sup} nearby
                     </div>
+                    {/* EDITORIAL neighbourhood-fit (feature 005). Present ONLY when the pick's ring
+                        holds a complementary trade — a pick with none carries no `topNeighbours`
+                        key and this line renders nothing (absent != 0, never a "0", FR-006). It is
+                        a hand-authored heuristic, NOT the measured GAP score above, so the tag reads
+                        EDITORIAL and it is never a re-weight factor. Same muted mono as the slider
+                        provenance notes; the tag is chrome-grey, never an accent, so it cannot be
+                        read as a data value. */}
+                    {p.topNeighbours && p.topNeighbours.length > 0 && (
+                      <div
+                        style={{
+                          fontFamily: MONO,
+                          fontSize: 9.5,
+                          color: "#7c858f",
+                          marginTop: 3,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <span
+                          style={{
+                            flex: "none",
+                            fontSize: 8,
+                            letterSpacing: ".1em",
+                            textTransform: "uppercase",
+                            padding: "1px 4px",
+                            borderRadius: 3,
+                            background: "rgba(255,255,255,.06)",
+                            color: "#8a949d",
+                          }}
+                        >
+                          editorial
+                        </span>
+                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {p.topNeighbours
+                            .slice(0, 3)
+                            .map((nb) => nb.category.replace(/_/g, " "))
+                            .join(" · ")}{" "}
+                          nearby
+                        </span>
+                      </div>
+                    )}
                   </div>
                   {/* Save this pick to the user's shortlist. stopPropagation so it does not also
                       open the provenance popup. Disabled while its save is in flight or once the
@@ -1349,6 +1392,14 @@ type PickProps = {
   h3: string;
   /** Composed by placeName() in trigger/chat.ts. Absent when the cell resolved to no district. */
   place?: string;
+  /**
+   * EDITORIAL neighbourhood-fit (feature 005) — a hand-authored heuristic, NOT a measurement and
+   * NOT part of the GAP ranking. rankSites attaches these ONLY when the pick's H3 ring holds at
+   * least one complementary trade; a pick with none carries neither key (absent != 0 — never a
+   * "fit 0" fact, FR-006), so the row simply shows nothing. See trigger/chat.ts / scoring.ts.
+   */
+  fit?: number;
+  topNeighbours?: { category: string; n: number; w: number }[];
 };
 
 /**
