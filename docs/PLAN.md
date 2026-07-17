@@ -96,10 +96,21 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
 
 ## Day 4 — 20 July · the wow, and the design
 
-- **Isochrones.** Valhalla in Docker locally → a Trigger.dev **batch task** precomputes
-  contours for candidate cells → `h3PolygonToCells` → stored in ClickHouse.
-  ⇒ no Valhalla at runtime, the demo can't be killed by a dead container, **and
-  Trigger.dev gets its second meaningful role** (25% criterion).
+- **Isochrones — precomputed, snapped to H3 res 9.** Valhalla runs **locally in Docker as
+  a build-time tool**; a Trigger.dev **batch task** precomputes 5/10/15-min contours per
+  candidate cell → `h3PolygonToCells` → ClickHouse.
+  ⇒ no Valhalla at runtime, no container to keep alive, **and Trigger.dev gets its second
+  meaningful role** (25% criterion).
+
+  **This still supports "click anywhere."** Snap the click to its H3 res 9 cell
+  (~0.1 km², ~180 m across — imperceptible on a map), look up the precomputed polygon in
+  ClickHouse, return it in sub-millisecond. See the decision note below.
+
+  Scale: Berlin ≈ 8.5k cells at res 9; all three cities ≈ 15–25k cells × 3 bands ≈
+  45–75k isochrones ≈ **1–2 h of one-off offline compute**.
+- Optional 30-min insurance: a hosted isochrone API (Geoapify — 3k credits/day, no credit
+  card; or OpenRouteService — 2.5k/day) behind a "live point" path, for clicks outside our
+  three cities.
 - **Progressive choreography** — the wave sequence from ADR-001, wired for real.
 - **Design integration** — whatever came back from the designer.
 - **OLTP surfacing**: "your saved sites vs the market" as a real chat answer (bonus prize).
@@ -141,12 +152,50 @@ If we are writing code on day 7, something went wrong on day 2.
 | Cut | Why |
 |---|---|
 | MVT vector tiles from SQL | needs 26.6; Cloud is on 26.4 and trails ~2 releases. GeoJSON is fine at our scale. |
-| Live isochrones for arbitrary clicked points | needs Valhalla at runtime = a box to keep alive through 29 July. Precompute instead. |
+| Runtime Valhalla (Cloudflare Containers / Fly.io) | **researched properly — see decision note below.** Not a trap, ~1 day of work, but a bad trade: it's a quarter of the budget spent on plumbing that makes our ClickHouse story *worse*. And H3 snapping dissolves the reason to want it. |
 | Auth / multi-user | zero rubric points |
 | Payload CMS-style layer catalogue | the sibling project's pattern is good and irrelevant here |
 | Whole-Europe scale | three cities is enough to prove it; ingest risk isn't worth 10% |
 | More than one basemap theme | two half-done themes < one good one |
 | MCP on the service | console-only toggle, marginal value, breaks ADR-001's context bypass if used by the agent |
+
+## Decision note — why runtime Valhalla is cut (researched 17 July)
+
+The question was raised properly: *can we wrap Valhalla in Cloudflare Containers, warm it
+before the demo, and handle cold start gracefully in the UI?* It deserves a real answer,
+because the instinct is good — "click anywhere, get your catchment" demos better than a
+precomputed grid.
+
+**Everything technical clears.** Cloudflare Containers went GA 2026-04-13; we have Workers
+Paid. Image size is **not** a constraint: image size = instance disk, and `standard-1`
+gives 8 GB disk / 4 GiB RAM. Measured: the Valhalla base image is 228 MB and **Berlin's
+built tiles are 538 MB** — ~800 MB total, fits with room to spare. `linux/amd64` only, but
+the gis-ops image publishes both arches. POST/JSON passes through the Worker verbatim; no
+response size cap. Cost ≈ **$1/day**. One container per city is idiomatic (Durable Objects
+are addressed by name, `idFromName("berlin")`) — but it solves a problem we don't have.
+
+**What doesn't clear:**
+- **Cold start for large images is unpublished.** Docs say "often 1–3s… dependent on image
+  size"; there is no number for ~800 MB + Valhalla's tile mmap. Unknown, not small.
+- **All container disk is ephemeral.** Sleep → next start gets a fresh disk from the image.
+- Do **not** FUSE-mount tiles from R2: the docs warn it isn't POSIX and isn't for
+  high-performance I/O, and Valhalla mmaps with random reads — the worst case for it.
+- Ironically **Fly.io is better for this workload**: `suspend` dumps VM state and resumes
+  in hundreds of ms, *preserving the warmed mmap*. Cloudflare has no equivalent.
+
+**But the deciding argument isn't technical — it's these two:**
+
+1. **It costs a day of four**, on plumbing that is orthogonal to what a ClickHouse
+   hackathon is judged on. It makes our ClickHouse story *worse*, not better.
+2. **H3 snapping dissolves the requirement entirely.** Snap the click to its res-9 cell —
+   ~180 m across, invisible to someone clicking a map — and look the polygon up in
+   ClickHouse in sub-milliseconds. The user still gets "click anywhere, get a catchment".
+   The difference is that **ClickHouse does the work on stage**, and Valhalla is relegated
+   to a build-time tool, which is what it's actually good at.
+
+Result: no cold start, no image question, no ephemeral disk, no demo-day failure mode, and
+a better story. Runtime Valhalla is the right call for the version of this project that has
+three weeks — not four days.
 
 ## Risk register
 
