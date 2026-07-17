@@ -8,6 +8,7 @@ import {
 } from "@trigger.dev/sdk/chat/react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { layers, namedFlavor } from "@protomaps/basemaps";
 import type { whereHouseChat } from "@/trigger/chat";
 import { mintChatAccessToken, startChatSession } from "@/app/actions";
 
@@ -18,7 +19,11 @@ const EMPTY_GEOJSON: GeoJSON.FeatureCollection = {
   features: [],
 };
 
-/** No basemap on purpose — day 2 is about the stream, not the cartography. */
+// Our own Protomaps tiles out of R2 (infra/basemap.sh). The extract stops at z14,
+// so maxzoom must say so or MapLibre asks for tiles that were never cut.
+const BASEMAP_TILES = "https://wherehouse.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt";
+const PM_ASSETS = "https://protomaps.github.io/basemaps-assets";
+
 function useMap(container: React.RefObject<HTMLDivElement | null>) {
   const map = useRef<maplibregl.Map | null>(null);
   const [ready, setReady] = useState(false);
@@ -31,10 +36,18 @@ function useMap(container: React.RefObject<HTMLDivElement | null>) {
       zoom: 11,
       style: {
         version: 8,
-        sources: {},
-        layers: [
-          { id: "bg", type: "background", paint: { "background-color": "#111" } },
-        ],
+        glyphs: `${PM_ASSETS}/fonts/{fontstack}/{range}.pbf`,
+        sprite: `${PM_ASSETS}/sprites/v4/dark`,
+        sources: {
+          basemap: {
+            type: "vector",
+            tiles: [BASEMAP_TILES],
+            maxzoom: 14,
+            attribution:
+              '© <a href="https://openstreetmap.org">OpenStreetMap</a> · <a href="https://protomaps.com">Protomaps</a>',
+          },
+        },
+        layers: layers("basemap", namedFlavor("dark"), { lang: "en" }),
       },
     });
     m.on("load", () => {

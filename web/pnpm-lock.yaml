@@ -17,6 +17,9 @@ importers:
       '@clickhouse/client':
         specifier: ^1
         version: 1.23.1
+      '@protomaps/basemaps':
+        specifier: ^5.7.2
+        version: 5.7.2
       '@trigger.dev/sdk':
         specifier: ^4.5.2
         version: 4.5.4(ai@5.0.215(zod@3.25.76))(react@19.2.7)(zod@3.25.76)
@@ -726,6 +729,10 @@ packages:
 
   '@protobuf-ts/runtime@2.11.1':
     resolution: {integrity: sha512-KuDaT1IfHkugM2pyz+FwiY80ejWrkH1pAtOBOZFuR6SXEFTsnb/jiQWQ1rCIrcKx2BtyxnxW6BWwsVSA/Ie+WQ==}
+
+  '@protomaps/basemaps@5.7.2':
+    resolution: {integrity: sha512-K1Yk6bWdULulYg+R2QRVXx4NzJZan5YQhpejEG0c1/sXruJrfPIPZuakpf3jwAgVmjIRVQwAv+yRafDeN0aaUQ==}
+    hasBin: true
 
   '@rollup/rollup-darwin-arm64@4.62.2':
     resolution: {integrity: sha512-v39RCCvj4He82I9sFmk+M1VZ0PLM9sfsLVikjfx2hYBNALhrrOR2D3JjQA6AhlaSOgcR+RzrKY7e1+bT6SUO/A==}
@@ -2652,6 +2659,8 @@ snapshots:
       - magicast
 
   '@protobuf-ts/runtime@2.11.1': {}
+
+  '@protomaps/basemaps@5.7.2': {}
 
   '@rollup/rollup-darwin-arm64@4.62.2':
     optional: true

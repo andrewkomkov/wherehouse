@@ -13,6 +13,7 @@
     "@ai-sdk/anthropic": "^2",
     "@ai-sdk/react": "^2",
     "@clickhouse/client": "^1",
+    "@protomaps/basemaps": "^5.7.2",
     "@trigger.dev/sdk": "^4.5.2",
     "ai": "^5",
     "maplibre-gl": "^5",
