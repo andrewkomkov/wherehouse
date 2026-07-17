@@ -25,7 +25,7 @@
 import { chat } from "@trigger.dev/sdk/ai";
 import type { ClickHouseClient } from "@clickhouse/client";
 
-export type LayerId = "competitors" | "opportunity" | "picks" | "catchment";
+export type LayerId = "competitors" | "opportunity" | "picks" | "catchment" | "saved";
 
 export type BBox = [number, number, number, number];
 

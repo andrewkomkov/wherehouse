@@ -19,6 +19,7 @@
     "ai": "^5",
     "maplibre-gl": "^5",
     "next": "^15",
+    "pg": "^8.22.0",
     "react": "^19",
     "react-dom": "^19",
     "zod": "^3"
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/geojson": "^7946.0.16",
     "@types/node": "^22",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "trigger.dev": "^4.5.2",

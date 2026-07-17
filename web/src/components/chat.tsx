@@ -11,7 +11,13 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { layers, namedFlavor } from "@protomaps/basemaps";
 import type { whereHouseChat } from "@/trigger/chat";
 import type { LayerId, Scale } from "@/trigger/layers";
-import { mintChatAccessToken, startChatSession } from "@/app/actions";
+import {
+  mintChatAccessToken,
+  startChatSession,
+  saveSiteAction,
+  listSavedSitesAction,
+} from "@/app/actions";
+import type { SavedSiteRow } from "@/lib/pg";
 import { Attribution } from "@/components/attribution";
 import {
   FACTORS,
@@ -119,12 +125,31 @@ async function fetchLayer(handle: string, signal: AbortSignal): Promise<GeoJSON.
   return JSON.parse(await res.text());
 }
 
-const LAYER_IDS: LayerId[] = ["opportunity", "competitors", "picks", "catchment"];
+const LAYER_IDS: LayerId[] = ["opportunity", "competitors", "picks", "catchment", "saved"];
 
 // The teal band for the walk catchment. Kept clear of the competitor warm and the pick yellow so
 // the shape reads as "the walk", not a data value: a low-alpha fill under a crisp accent outline.
 const CATCHMENT_FILL_OPACITY = 0.14;
 const CATCHMENT_LINE_WIDTH = 2;
+
+// The user's saved sites (feature 003, compareSavedSites). Drawn as a HOLLOW ring on purpose:
+// competitor dots are filled warm, the pick pins are solid yellow — both are things the app is
+// pointing at. A saved site is the user's own, so it must not read as another recommendation; an
+// open ring says "yours", not "ours". The ring is badged by today's market gap when the compare
+// scored the cell, and stays a neutral grey when it did not (absent != 0 — an unscored save is
+// never coloured as gap 0). Endpoints run warm→teal like the choropleth's meaning: low gap =
+// saturated market (bad), high gap = underserved (good).
+const SAVED_RADIUS = 8;
+const SAVED_STROKE_WIDTH = 3;
+const SAVED_STROKE: maplibregl.ExpressionSpecification = [
+  "case",
+  ["has", "marketGap"],
+  [
+    "interpolate", ["linear"], ["get", "marketGap"],
+    0, C.competitor, 40, "#e0b34a", 70, "#57d8cf", 100, "#8ff2dd",
+  ],
+  "#8a949d",
+] as unknown as maplibregl.ExpressionSpecification;
 
 // ---------------------------------------------------------------------------------------------
 // Animation
@@ -266,6 +291,24 @@ function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
           "circle-stroke-color": "rgba(0,0,0,0.35)",
         },
       });
+      // The user's saved sites: a hollow ring per site, drawn OVER the competitor dots (it is the
+      // user's own marker, so it must sit above the market it is being compared against) and UNDER
+      // the pick markers. Colour is the marketGap expression; the reveal only moves radius/width/
+      // opacity, so the ramp is never re-derived. Empty until compareSavedSites emits the layer.
+      m.addLayer({
+        id: "saved",
+        type: "circle",
+        source: "saved",
+        paint: {
+          "circle-radius": 0,
+          // Hollow: no fill, only the ring. This is what separates a saved site from a competitor.
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-opacity": 0,
+          "circle-stroke-width": 0,
+          "circle-stroke-color": SAVED_STROKE,
+          "circle-stroke-opacity": 0,
+        },
+      });
       // `picks` has no MapLibre layer — the three pins are DOM markers (see PickMarkers). A
       // circle layer cannot do the #1's glow, its pulse ring, or the drop-and-settle, and there
       // are only ever three of them.
@@ -292,7 +335,10 @@ export function Chat() {
     startSession: ({ chatId, clientData }) => startChatSession({ chatId, clientData }),
   });
 
-  const { messages, sendMessage, status } = useChat<Msg>({ transport });
+  // `id` is the chatId the transport keys sessions on (its accessToken/startSession callbacks
+  // receive the same value). Saving a pick from the client threads it through so the save lands
+  // under the same shortlist scope as the conversation.
+  const { messages, sendMessage, status, id: chatId } = useChat<Msg>({ transport });
   const [input, setInput] = useState("where should I open a bakery in Berlin?");
   const [error, setError] = useState<string | null>(null);
   const [weights, setWeights] = useState<Weights>({ ...NEUTRAL });
@@ -301,9 +347,22 @@ export function Chat() {
     competitors: true,
     picks: true,
     catchment: true,
+    // The compare flow's saved-site layer (feature 003): the user's saved sites as hollow rings,
+    // emitted by compareSavedSites and toggled independently below.
+    saved: true,
   });
   const [selected, setSelected] = useState<number | null>(null);
   const [replaying, setReplaying] = useState(false);
+  /**
+   * The user's saved history (feature 003). Postgres is authoritative, so this is loaded straight
+   * from `listSavedSitesAction` on mount and after every save — it survives a reload because the
+   * data lives in Postgres, not in this component. Today's market gap is NOT here (Postgres never
+   * scored it); that arrives on the `saved` map layer once compareSavedSites runs, and the panel
+   * joins the two by coordinate below.
+   */
+  const [savedSites, setSavedSites] = useState<SavedSiteRow[]>([]);
+  /** Picks whose save is in flight, keyed by h3 — for the row's transient "saving…" state. */
+  const [saving, setSaving] = useState<Set<string>>(new Set());
   /**
    * Bumped whenever `store` (a ref) gains a layer, purely to force a re-render.
    *
@@ -346,6 +405,83 @@ export function Chat() {
     return (fc?.features ?? []) as GeoJSON.Feature<GeoJSON.Point, PickProps>[];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature, storeVersion]);
+
+  // ---- saved sites (feature 003) --------------------------------------------------------
+
+  /**
+   * The city + category THIS answer is about, recovered from the picks layer's own label
+   * (`top {n} for {category} in {city}`, set in trigger/chat.ts). A save has to carry the same
+   * (city, category) the agent's saveSite would — the shortlist is keyed on them — and this is the
+   * one place the pair is stated verbatim on the client. `category` may be a group ("food and
+   * drink"), which contains no " in " and so survives the greedy split unharmed.
+   */
+  const answerMeta = useMemo(() => {
+    const m = latest.get("picks")?.label.match(/^top \d+ for (.+) in (.+)$/);
+    return m ? { category: m[1], city: m[2] } : null;
+  }, [latest]);
+
+  /**
+   * Today's market gap per saved site, keyed by rounded coordinate — the join between the Postgres
+   * list (authoritative, no score) and the `saved` map layer (compareSavedSites re-scored it).
+   * Both sides derive lon/lat from the same stored double, so 5-decimal keys match. `marketGap` is
+   * absent for a site outside today's scored set (the SQL drops the key — absent != 0).
+   */
+  const marketByCoord = useMemo(() => {
+    void storeVersion;
+    const out = new Map<string, SavedProps>();
+    for (const f of (store.current.saved?.features ?? []) as GeoJSON.Feature<GeoJSON.Point, SavedProps>[]) {
+      const [lon, lat] = f.geometry.coordinates;
+      out.set(`${lon.toFixed(5)},${lat.toFixed(5)}`, f.properties);
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature, storeVersion]);
+
+  /** h3 cells already saved — so a pick row can show its saved state and survive a reload. */
+  const savedH3 = useMemo(() => new Set(savedSites.map((s) => s.h3_8)), [savedSites]);
+
+  const reloadSaved = useCallback(async () => {
+    try {
+      setSavedSites(await listSavedSitesAction());
+    } catch {
+      // A failed history load is not worth an error banner over the map — the panel simply stays
+      // as it was. A real save failure surfaces through setError on the save path instead.
+    }
+  }, []);
+
+  // Load the history once, on mount. It is Postgres-backed, so this is what makes it survive reload.
+  useEffect(() => {
+    void reloadSaved();
+  }, [reloadSaved]);
+
+  const savePick = useCallback(
+    async (f: GeoJSON.Feature<GeoJSON.Point, PickProps>) => {
+      const meta = answerMeta;
+      const p = f.properties;
+      if (!meta || saving.has(p.h3) || savedH3.has(p.h3)) return;
+      const [lon, lat] = f.geometry.coordinates;
+      setSaving((s) => new Set(s).add(p.h3));
+      const res = await saveSiteAction({
+        chatId,
+        city: meta.city,
+        category: meta.category,
+        label: p.place ?? "saved site",
+        lon,
+        lat,
+        h3_8: p.h3,
+        // The pick's own score. Always present on a ranked pick, so no absent/0 ambiguity here.
+        score: p.gap,
+      });
+      setSaving((s) => {
+        const n = new Set(s);
+        n.delete(p.h3);
+        return n;
+      });
+      if (res.ok) await reloadSaved();
+      else setError(`save: ${res.error}`);
+    },
+    [answerMeta, chatId, saving, savedH3, reloadSaved],
+  );
 
   // ---- painting -------------------------------------------------------------------------
 
@@ -425,6 +561,29 @@ export function Chat() {
         m.setPaintProperty("catchment-line", "line-width", CATCHMENT_LINE_WIDTH);
         m.setPaintProperty("catchment-line", "line-opacity", lineOn);
         m.setPaintProperty("catchment", "fill-opacity", fillOn);
+        return;
+      }
+
+      if (layer === "saved") {
+        src!.setData(fc);
+        const on = visible.saved ? 1 : 0;
+        // The rings draw on: radius and stroke grow together, opacity a beat behind. This is the
+        // saved layer arriving from ClickHouse (compareSavedSites), the same reveal discipline as
+        // every other layer — never a timer, and only ever a handful of shapes.
+        await tween(
+          560,
+          (t) => {
+            const k = Math.min(1, t * 1.3);
+            m.setPaintProperty("saved", "circle-radius", SAVED_RADIUS * k);
+            m.setPaintProperty("saved", "circle-stroke-width", SAVED_STROKE_WIDTH * k);
+            m.setPaintProperty("saved", "circle-stroke-opacity", on * Math.min(1, t * 1.6));
+          },
+          cancelled,
+        );
+        if (cancelled()) return;
+        m.setPaintProperty("saved", "circle-radius", SAVED_RADIUS);
+        m.setPaintProperty("saved", "circle-stroke-width", SAVED_STROKE_WIDTH);
+        m.setPaintProperty("saved", "circle-stroke-opacity", on);
         return;
       }
     },
@@ -538,6 +697,10 @@ export function Chat() {
     if (m.getLayer("catchment")) {
       m.setPaintProperty("catchment", "fill-opacity", visible.catchment ? CATCHMENT_FILL_OPACITY : 0);
       m.setPaintProperty("catchment-line", "line-opacity", visible.catchment ? 1 : 0);
+    }
+    // Likewise: toggling the saved rings touches only the saved layer, never picks or competitors.
+    if (m.getLayer("saved")) {
+      m.setPaintProperty("saved", "circle-stroke-opacity", visible.saved ? 1 : 0);
     }
   }, [ready, map, visible]);
 
@@ -895,6 +1058,26 @@ export function Chat() {
               </span>
             }
           />
+          {/* Independent toggle for the user's saved rings — a hollow grey ring in the swatch to
+              echo the map marker and to read as "yours", distinct from the solid pick disc above. */}
+          <Toggle
+            on={visible.saved}
+            onClick={() => setVisible((v) => ({ ...v, saved: !v.saved }))}
+            label="Saved sites"
+            swatch={
+              <span style={{ width: 44, display: "flex", justifyContent: "center" }}>
+                <span
+                  style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: "50%",
+                    border: "2px solid #8a949d",
+                    background: "transparent",
+                  }}
+                />
+              </span>
+            }
+          />
         </section>
 
         <section>
@@ -974,6 +1157,8 @@ export function Chat() {
               const p = f.properties;
               const top = p.rank === 1;
               const score = scale ? gapDisplay(p as CellProps, scale, weights) : p.gap;
+              const isSaved = savedH3.has(p.h3);
+              const isSaving = saving.has(p.h3);
               return (
                 <div
                   key={p.rank}
@@ -1035,10 +1220,99 @@ export function Chat() {
                       {score} / 100 · ~{Number(p.pop).toLocaleString("en")} people · {p.sup} nearby
                     </div>
                   </div>
+                  {/* Save this pick to the user's shortlist. stopPropagation so it does not also
+                      open the provenance popup. Disabled while its save is in flight or once the
+                      cell is already saved — the "saved" state is read back from Postgres, so it
+                      survives a reload. Also disabled until we can name the answer's city/category. */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void savePick(f);
+                    }}
+                    disabled={!answerMeta || isSaving || isSaved}
+                    className={isSaved ? "wh-save wh-save-done" : "wh-save"}
+                  >
+                    {isSaved ? "✓ saved" : isSaving ? "saving…" : "save"}
+                  </button>
                 </div>
               );
             })}
           </div>
+        </section>
+        )}
+
+        {/* The user's saved history. Like Top picks, no saves ⇒ no heading: an empty panel reads as
+            a failed load, an absent one reads as "nothing saved yet", which is the truth. This list
+            is Postgres-backed (listSavedSitesAction), so it survives a reload; today's market gap is
+            joined in from the compareSavedSites layer by coordinate. */}
+        {savedSites.length > 0 && (
+        <section>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <Label inline>Saved sites</Label>
+            <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 9, color: C.faint }}>
+              {savedSites.length}
+            </span>
+          </div>
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            {savedSites.map((s) => {
+              const props = marketByCoord.get(`${s.lon.toFixed(5)},${s.lat.toFixed(5)}`);
+              const gap = props?.marketGap;
+              return (
+                <div key={s.id} className="wh-saved-row">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        color: "#eef3f5",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {s.label}
+                    </div>
+                    <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
+                      {/* The saved score MAY be null — an unscored save renders "unscored", never 0. */}
+                      {s.score != null ? `${s.score} / 100` : "unscored"} · {s.status}
+                    </div>
+                  </div>
+                  {/* Today's market gap, from compareSavedSites. Absent until it runs, and absent —
+                      not 0 — for a site outside today's scored set, so a dash rather than a number. */}
+                  <div style={{ textAlign: "right", flex: "none" }}>
+                    <div
+                      style={{
+                        fontFamily: MONO,
+                        fontSize: 9,
+                        letterSpacing: ".08em",
+                        color: C.faint,
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      today
+                    </div>
+                    <div style={{ fontFamily: MONO, fontSize: 13, color: gap != null ? C.accent : C.dim }}>
+                      {gap != null ? gap : "—"}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {/* Ask the agent to run compareSavedSites: the answer is the saved rings landing on the
+              map and the "today" column above filling in. A chat message, not a direct tool call —
+              the agent owns the re-score against today's surface. */}
+          <button
+            onClick={() => {
+              if (busy) return;
+              setError(null);
+              sendMessage({ text: "How do my saved sites compare to the market?" });
+            }}
+            disabled={busy}
+            className="wh-compare"
+          >
+            Compare vs the market
+          </button>
         </section>
         )}
 
@@ -1075,6 +1349,21 @@ type PickProps = {
   h3: string;
   /** Composed by placeName() in trigger/chat.ts. Absent when the cell resolved to no district. */
   place?: string;
+};
+
+/**
+ * The `saved` layer's per-feature properties, assembled in savedSitesGeoJsonSql (trigger/scoring.ts).
+ * `label`/`status`/`savedScore` are always present; `marketGap`/`residents`/`rivals` exist ONLY when
+ * today's surface scored the cell — a site outside the scored set carries none of them (absent != 0,
+ * so the panel shows a dash, never a 0).
+ */
+type SavedProps = {
+  label: string;
+  status: string;
+  savedScore: number;
+  marketGap?: number;
+  residents?: number;
+  rivals?: number;
 };
 
 /**
@@ -1384,6 +1673,16 @@ const CSS = `
   font-weight:500;cursor:pointer}
 .wh-reset{margin-top:6px;padding:7px;font-size:11.5px;color:#98a2ab}
 .wh-replay:disabled{opacity:.35;cursor:default}
+.wh-save{flex:none;padding:5px 9px;border-radius:7px;background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.12);color:#cdd6dd;font-family:${MONO};font-size:10px;cursor:pointer}
+.wh-save:disabled{cursor:default}
+.wh-save-done{background:rgba(111,240,224,.12);border-color:rgba(111,240,224,.35);color:#9defdf}
+.wh-saved-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;
+  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
+.wh-compare{width:100%;margin-top:10px;padding:9px;border-radius:9px;background:rgba(111,240,224,.1);
+  border:1px solid rgba(111,240,224,.28);color:#9defdf;font-family:${SANS};font-size:12.5px;
+  font-weight:500;cursor:pointer}
+.wh-compare:disabled{opacity:.4;cursor:default}
 input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:3px;
   background:rgba(255,255,255,.14);outline:none;margin:7px 0}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:13px;height:13px;

@@ -1,10 +1,11 @@
-import { chat } from "@trigger.dev/sdk/ai";
+import { chat, ai } from "@trigger.dev/sdk/ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { streamText, stepCountIs, tool } from "ai";
 import type { InferUITools, UIMessage } from "ai";
 import { createClient } from "@clickhouse/client";
 import { z } from "zod";
 import { emitLayer, type MapData, type BBox } from "./layers";
+import { upsertShortlist, insertSavedSite } from "../lib/pg";
 import {
   CITIES,
   isCity,
@@ -15,6 +16,8 @@ import {
   rankSql,
   catchmentSql,
   catchmentStatsSql,
+  savedSitesRowsSql,
+  savedSitesGeoJsonSql,
   type CityName,
 } from "./scoring";
 
@@ -349,7 +352,120 @@ const showCatchment = tool({
   },
 });
 
-const tools = { findCompetitors, scoreArea, rankSites, showCatchment };
+// The user is `u1` everywhere in this demo — there is no auth yet, and the write side
+// (db/postgres/001_oltp_schema.sql) keys sites on it. One place so it cannot drift.
+const DEMO_USER_ID = "u1";
+
+/**
+ * The shortlist's chat scope when we cannot recover the real chatId.
+ *
+ * `ai.chatContext()` reads it from the run's tool metadata, which is only populated when a tool
+ * runs as a subtask (`ai.toolExecute`). These tools run INLINE in the agent run, so it returns
+ * undefined and this constant is what upsertShortlist keys on. The one visible effect: every save
+ * for the same (user, city, business_type) lands under ONE shortlist regardless of conversation,
+ * which is the right behaviour for a single-user demo and wrong for multi-tenant — a real product
+ * would thread the chatId through. Not invented data, just a coarser grouping. (constitution II —
+ * stated as the limitation it is, not dressed up as per-chat isolation we did not build.)
+ */
+const SAVE_CHAT_SCOPE = "wherehouse-demo";
+
+const saveSite = tool({
+  description:
+    "Save one of the ranked picks to the user's shortlist so they can compare it against the market later. Use when the user asks to save/keep/shortlist a pick.",
+  inputSchema: target.extend({
+    which: z
+      .enum(["1", "2", "3"])
+      .default("1")
+      .describe("which ranked pick to save: '1' is the best, then '2', then '3'. Defaults to the best."),
+  }),
+  execute: async ({ city, category, which }) => {
+    const c = checkCity(city);
+    if (!c.ok) return c.err;
+    const cats = resolveCategories(category);
+
+    // Re-derive the picks from the same deterministic ranking rankSites showed (FR-004), rather
+    // than trusting a model-supplied h3/score — the model never sees the geometry (ADR-001) and a
+    // threaded h3 is a hallucination surface bought for nothing. `which` only chooses among them.
+    const picks = await queryRows<Pick>(rankSql(c.city, cats, 3));
+    const pick = picks[Number(which) - 1];
+    if (!pick) {
+      return { error: "no such pick to save", city: c.city, category, which };
+    }
+
+    const label = placeName(pick) ?? "saved site";
+    const chatId = ai.chatContext()?.chatId ?? SAVE_CHAT_SCOPE;
+    const shortlistId = await upsertShortlist({
+      chatId,
+      userId: DEMO_USER_ID,
+      city: c.city,
+      businessType: category,
+      title: `${category} in ${c.city}`,
+    });
+    await insertSavedSite({
+      shortlistId,
+      userId: DEMO_USER_ID,
+      label,
+      lon: pick.lon,
+      lat: pick.lat,
+      h3_8: pick.h3,
+      score: pick.gap,
+    });
+
+    // No map layer: the pin is already on screen from rankSites. Just a small confirmation the
+    // model may relay — the label came from a tool, so it is safe to say (see SYSTEM_PROMPT).
+    return { saved: label, rank: which, status: "candidate" };
+  },
+});
+
+const compareSavedSites = tool({
+  description:
+    "Compare the user's saved sites against today's market — re-score each saved site on the current GAP surface and show them on the map. Use when the user asks how their saved/kept sites compare.",
+  inputSchema: target,
+  execute: async ({ city, category }) => {
+    const c = checkCity(city);
+    if (!c.ok) return c.err;
+    const cats = resolveCategories(category);
+
+    // The summary drives the early return: no saved sites ⇒ emit NOTHING (a drawn empty layer is a
+    // different claim than no layer at all) and tell the model the count, not a fake success.
+    const rows = await queryRows<{
+      label: string;
+      // market_gap/residents/rivals come back null for a site outside today's scored set (a LEFT
+      // JOIN miss). null is "unscored", never 0 (FR-006) — marketGap is then dropped from the model
+      // payload, so the model has no number to relay and cannot narrate an absent score as a real one.
+      market_gap: number | null;
+      residents: number | null;
+      rivals: number | null;
+      status: string;
+    }>(savedSitesRowsSql(c.city, cats, DEMO_USER_ID));
+
+    if (rows.length === 0) {
+      return { savedSites: 0 };
+    }
+
+    const geojsonText = await queryText(savedSitesGeoJsonSql(c.city, cats, DEMO_USER_ID));
+    await emitLayer(clickhouse, {
+      layer: "saved",
+      label: `${rows.length} saved ${category} ${rows.length === 1 ? "site" : "sites"} in ${c.city}`,
+      geojsonText,
+      rowCount: rows.length,
+    });
+
+    // ADR-001: the map carries the geometry, the model sees only this summary.
+    return {
+      sites: rows.map((r) => ({
+        label: r.label,
+        // Omitted when unscored — absent != 0. Present only when today's surface scored the cell.
+        ...(r.market_gap != null ? { marketGap: r.market_gap } : {}),
+        residents: r.residents,
+        rivals: r.rivals,
+        status: r.status,
+      })),
+    };
+  },
+});
+
+const tools = { findCompetitors, scoreArea, rankSites, showCatchment, saveSite, compareSavedSites };
 
 /**
  * The system prompt, exported so the naming guard can be EXECUTED against a live model rather
@@ -432,6 +548,13 @@ export const SYSTEM_PROMPT = [
   // Scoped to the no-name case ONLY. Unscoped, this line reads as an invitation to recite the
   // numbers and it defeats the no-enumeration rule above — which is precisely what it did.
   "When a pick has no `place`, and only then, you may fall back to describing it by what the tools returned — its population and nearby competitor count — instead of a name.",
+  // Feature 003, the OLTP+OLAP save/compare flow. The same evidence discipline as the place-name
+  // rules above: a saved site, its label and its market comparison are only ever what a tool
+  // returned. saveSite/compareSavedSites do NOT invent — saveSite re-derives the pick from the
+  // deterministic ranking, compareSavedSites re-scores the user's real saved sites — so relaying
+  // their payload is safe. Inventing a save, a label or a score is the day-3 bug in a new place.
+  "When the user asks to save, keep or shortlist a pick, call saveSite; when they ask how their saved or kept sites compare, call compareSavedSites.",
+  "You may relay a saved site's label and its market comparison ONLY from the saveSite/compareSavedSites payload. Never invent a saved site, a label or a score, never claim a save or a comparison a tool did not return, and when a saved site's marketGap is absent say it is unscored — never 0.",
   "The score is a ranking heuristic over real data, not a measurement. Do not overstate it.",
   "If a tool returns an error, say plainly what is unavailable. Never pretend a map was drawn.",
 ].join(" ");

@@ -270,6 +270,97 @@ export function bboxSql(city: CityName, categories: string[]): string {
 }
 
 /**
+ * The saved-site join — this feature's whole point (ADR-004, the OLTP+OLAP story).
+ *
+ * A user's saved sites (seconds old, replicated from managed Postgres by ClickPipes CDC into
+ * `oltp.pg_saved_sites`) re-scored against *today's* market: the same `scored` CTE the choropleth
+ * and ranking read, joined on `stringToH3(ss.h3_8) = sc.cell` — H3 equality, no interpolation.
+ *
+ * The join to `scored` is **LEFT**: a saved site whose h3 sits outside the scored set (e.g. the
+ * user pinned a spot past the city bbox) survives with a NULL score and renders "unscored", never
+ * 0 — the same absent-≠-0 discipline the accessibility term keeps (FR-006). `if(sc.cell != 0, …)`
+ * is the guard: a LEFT JOIN miss leaves `sc.cell` at the H3 zero value, so `market_gap`/`residents`/
+ * `rivals` are omitted entirely rather than emitted as 0.
+ *
+ * `oltp.pg_shortlists` scopes the sites to the requested city (a user's shortlist carries the city;
+ * saved sites carry no city of their own). Both `_peerdb_is_deleted = 0` filters are mandatory —
+ * CDC keeps tombstones, and without them a deleted site or shortlist reappears.
+ *
+ * Measured, u1 / berlin / bakery, 2026-07-17: 'Kastanienallee corner' gap 0.0 (3,725 residents,
+ * 25 rivals), 'Boxhagener Platz' 18.2 (1,772, 10) — both saturated central sites.
+ */
+export function savedSitesGeoJsonSql(
+  city: CityName,
+  categories: string[],
+  userId: string,
+): string {
+  const uid = userId.replace(/'/g, "''");
+  const c = city.replace(/'/g, "''");
+  return `WITH ${candidateCells(city, categories)}
+  SELECT concat('{"type":"FeatureCollection","features":[',
+    arrayStringConcat(groupArray(concat(
+      '{"type":"Feature","geometry":{"type":"Point","coordinates":[',
+      toString(round(ss.lon, 5)), ',', toString(round(ss.lat, 5)),
+      ']},"properties":{"label":', toJSONString(ss.label),
+      ',"status":', toJSONString(ss.status),
+      -- absent != 0 for the saved score too: a site saved before it was scored has score = NULL,
+      -- and round(NULL) would collapse the whole feature's concat to NULL and silently drop the
+      -- site from the map. Guard it, so a null score omits the key and renders "unscored".
+      if(isNotNull(ss.score), concat(',"savedScore":', toString(round(ss.score, 1))), ''),
+      -- absent != 0: the market keys exist only when the LEFT JOIN found a scored cell (FR-006).
+      -- A site outside the scored set keeps sc.cell at the H3 zero value ⇒ no keys ⇒ "unscored".
+      if(sc.cell != 0, concat(
+        ',"marketGap":', toString(round(sc.gap, 1)),
+        ',"residents":', toString(round(sc.pop)),
+        ',"rivals":', toString(sc.sup)), ''),
+      '}}')), ','),
+    ']}')
+  -- FINAL on both CDC tables: they are SharedReplacingMergeTree keyed on _peerdb_version, so an
+  -- edited or deleted site can sit as two versions until a background merge. Without FINAL the
+  -- older (un-deleted) version can win and a just-deleted site reappears — exactly the freshness
+  -- CDC exists to give us. FINAL collapses to the latest version per row before the filter runs.
+  FROM oltp.pg_saved_sites AS ss FINAL
+  INNER JOIN oltp.pg_shortlists AS sl FINAL ON ss.shortlist_id = sl.id AND sl.city = '${c}'
+  LEFT JOIN scored sc ON stringToH3(ss.h3_8) = sc.cell
+  WHERE ss._peerdb_is_deleted = 0 AND sl._peerdb_is_deleted = 0 AND ss.user_id = '${uid}'`;
+}
+
+/**
+ * The same join as `savedSitesGeoJsonSql`, but plain columns for the model's summary — never
+ * geometry (ADR-001). `market_gap`/`residents`/`rivals` come back NULL for a site outside the
+ * scored set (LEFT JOIN miss); the caller renders that as "unscored", never 0 (FR-006).
+ *
+ * Measured, u1 / berlin / bakery, 2026-07-17: two rows, market_gap 0.0 and 5.4. (The 5.4 was
+ * 18.2 while the score was two-term; feature 002 folded accessibility into the same candidateCells
+ * this reuses, so a saved site is now judged against the current three-term market — which is the
+ * point of re-scoring it live rather than trusting the score we stored when it was saved.)
+ */
+export function savedSitesRowsSql(
+  city: CityName,
+  categories: string[],
+  userId: string,
+): string {
+  const uid = userId.replace(/'/g, "''");
+  const c = city.replace(/'/g, "''");
+  return `WITH ${candidateCells(city, categories)}
+  SELECT ss.label            AS label,
+         ss.h3_8             AS h3_8,
+         ss.score            AS saved_score,
+         round(sc.gap, 1)    AS market_gap,
+         sc.pop              AS residents,
+         sc.sup              AS rivals,
+         ss.status           AS status,
+         ss.created_at       AS created_at
+  -- FINAL: see savedSitesGeoJsonSql — collapse SharedReplacingMergeTree versions before filtering
+  -- so a just-deleted or just-edited site is read at its latest version, not a stale one.
+  FROM oltp.pg_saved_sites AS ss FINAL
+  INNER JOIN oltp.pg_shortlists AS sl FINAL ON ss.shortlist_id = sl.id AND sl.city = '${c}'
+  LEFT JOIN scored sc ON stringToH3(ss.h3_8) = sc.cell
+  WHERE ss._peerdb_is_deleted = 0 AND sl._peerdb_is_deleted = 0 AND ss.user_id = '${uid}'
+  ORDER BY ss.created_at`;
+}
+
+/**
  * The walk catchment of a single pick, as one GeoJSON string — one Feature **per lobe** (D5).
  *
  * `geo.isochrones` stores a multi-lobed contour as several rows on purpose (445 of Berlin's are
