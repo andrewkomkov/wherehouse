@@ -319,6 +319,145 @@ If we are writing code on day 7, something went wrong on day 2.
 
 ---
 
+## Researched feature backlog — all requested 17 July, all verified against live systems
+
+Five features were requested and the product owner considers all of them needed. Each was
+**de-risked against the live service before being written here** (constitution II/III) — the
+verification command and its output are recorded, not a doc claim. They are ranked against the
+rubric (constitution VI) and ordered by dependency, not by how interesting they are.
+
+**Where ClickHouse's showcase features actually belong** (asked directly, answered honestly):
+we currently use MATERIALIZED **columns** (`h3_8/h3_9 = geoToH3(...)`, the lat/lon-trap
+mitigation) but **zero materialized views** — verified live, `system.tables` has no
+`MaterializedView` engine. That is correct, not a gap: an MV over the static `geo.places` would
+be decoration (Principle I of not-decorating). MVs earn their place on **growing** data — the
+historical rollup (F3) and optionally the CDC stream (F2) — and that is where they go. Likewise
+SQL UDFs and dictionaries land in F5, where they do real work.
+
+### F1 — Walk catchment + Accessibility *(IN FLIGHT — spec 002, day-4 slot)*
+
+Already specified (`specs/002-walk-catchment-accessibility/`) and being implemented through an
+agent workflow (constitution VII). Not re-described here; see the spec. Its metrics (reachable
+population, cells-not-measured) are inputs to the dashboard (F4).
+
+### F2 — Saved-site history: your sites vs the market *(bonus prize: OLTP+OLAP)*
+
+**What**: a persistent history of saved sites, not a one-shot save. Two save flows (a map click
+*and* a chat command), a "Saved sites" panel and an agent tool to **return to** past shortlists,
+and a comparison — each saved site re-scored against *today's* market, ranked against each other
+and against the agent's own top-3. Both the agent and the UI compare.
+
+**Verified live 2026-07-17**: the schema already models this — no new tables.
+`oltp.pg_shortlists` (chat_id, user_id, city, business_type, **weights**, created_at) and
+`oltp.pg_saved_sites` (label, lat, lon, **h3_8**, score, status, created_at); CDC is live (2 real
+rows already replicated). Because a saved site carries `h3_8`, it joins `geo.places.h3_8` /
+`geo.population` on **equality, no interpolation** — a seconds-old Postgres row against 75M
+Overture POIs. That join *is* the bonus-prize story.
+
+**Mechanism**: save → Postgres → ClickPipes CDC → `oltp.pg_*` (~10 s) → agent tool joins against
+the GAP surface. Optional MV: a rollup of the CDC stream if the compare query needs it (measure
+first — it is 2 rows today, so probably not until it grows).
+
+**Rubric**: separate bonus prize, less competition, infra already built (ADR-004). High value,
+low cost. **Order: first after F1.** Lock the visual-comparison form (pins+metrics panel vs
+ranked list) with a spec question when specced.
+
+### F3 — Historical momentum: is this market rising, flat, or saturating?
+
+**What**: a monthly time series per locality per category over ~3+ years, so the agent advises on
+*trend*, not just today's snapshot — "open where demand is rising and supply still lags," a signal
+the static GAP score cannot see.
+
+**The naive source is dead, and checking killed it**: the public Overture S3 bucket retains only
+**two** releases (`2026-05-20`, `2026-06-17`) — verified by enumerating it. There is no 3-year
+Overture history to diff.
+
+**The real source, proven feasible**: OSM history via the free, no-auth **ohsome API** (HeiGIT).
+Verified live 2026-07-17, Berlin bbox, monthly/yearly counts:
+
+| category | curve | reading |
+|---|---|---|
+| `shop=bakery` | 1504 → 1427 (2022→2026) | flat/declining — saturated |
+| `amenity=cafe` | 2315 → 2663 (2019→2026) | +15% — gentle rise |
+| `amenity=charging_station` | 312 → 1727 (2019→2026) | **+450%** — boom |
+
+The signal **discriminates** (flat vs rising vs boom), which is the whole point. And it
+**cross-validates**: ohsome's ~1450 bakeries matches our Overture count of ~1,460 to within 1% —
+two independent sources agreeing (constitution II).
+
+**The confound, stated not hidden**: OSM counts rise partly because OSM *mapping* improves, not
+only because businesses open. Mitigation: (a) restrict to recent years where coverage is mature —
+the flat bakery curve proves coverage is *not* dominating recently; (b) frame as **relative
+momentum**, never absolute counts; (c) keep the cross-validation as a standing check. If it ever
+reads as a coverage artefact, it is labelled a guess, not shipped as fact.
+
+**Mechanism & the MV**: ohsome is a **build-time loader** (like Valhalla) driven by a Trigger.dev
+cron; it backfills monthly (city, category, h3_8, month) counts into ClickHouse. A raw
+`geo.poi_history` table + an **incremental AggregatingMergeTree materialized view** rolling it
+into per-cell monthly trends is the genuine MV use case *and* the "look how much data ClickHouse
+holds" flex the owner wants (~40 months × ~2,260 cells × ~10 categories × 3 cities ≈ millions of
+rows). ohsome `/groupBy/boundary` with district polygons keeps the backfill to a few calls, not
+2,260 — **validate that grouping shape at build time.**
+
+**Rubric**: Innovation + Scalability + the ClickHouse-volume showcase. Higher cost (loader, MV,
+honesty framing) than F2/F5. **Order: after F5.**
+
+### F4 — Dashboard framing the map with metrics
+
+**What**: the map stays the main app, but sits inside a dashboard whose metrics make it more
+legible. Not a separate BI screen — a frame. It is the **integration surface** where F1/F2/F3/F5
+metrics live around the map.
+
+**Proposed metrics (invented, each tied to real data we already compute)**:
+- **Top pick**: score + its three components (reachable residents, nearby competitors,
+  accessibility) — from F1's `rankSites`.
+- **Market**: total competitors, median GAP, % of city underserved, population covered.
+- **Honesty**: cells measured vs not-measured — from F1. (Showing where we *stopped* measuring is
+  the thing a competitor's demo won't do.)
+- **Momentum**: this category's 3-year trend as a sparkline — from F3. "Bakeries −5% · Cafes +15%."
+- **Your sites**: saved-site count and best saved score vs market — from F2.
+- **Neighbourhood fit**: the affinity score for the top pick — from F5.
+
+**Guardrail (constitution I)**: metrics serve the map, never become a wall of numbers competing
+with it. Two sentences of caption stay the ceiling; a number earns its tile only if it changes a
+decision. Adhere to the design comp (map-dominant, floating instrument rail); the current
+`chat.tsx` rail is already the seed of this.
+
+**Rubric**: Presentation (5%) — but it is 100% of what the judge sees. **Order: last / incremental**
+— it needs the other features' metrics to exist, and grows as they land.
+
+### F5 — Complementary-business affinity (a barbershop next door is a plus)
+
+**What**: the advice accounts for *other* nearby trades, not just rivals. For a coffee shop a
+barbershop, bookshop or gym nearby is a plus (complementary footfall); a laundromat is neutral;
+another coffee shop is the existing competition term (not double-counted here). A per-cell
+**neighbourhood-fit** score over the k-ring's business mix, feeding the recommendation.
+
+**Verified live 2026-07-17**: SQL UDFs work on Cloud 26.4 — created `wh_probe_affinity(target,
+neighbor)`, called it (`cafe`×`hairdresser` → +1.0, `cafe`×`cafe` → −0.5), dropped it. So the
+mechanism is a `CREATE FUNCTION` affinity(target, neighbor)→weight (or a `CREATE DICTIONARY` for a
+larger table), applied over `arrayJoin(h3kRing(...))` neighbours — real ClickHouse UDF/dictionary
+depth (25% criterion).
+
+**The affinity dictionaries are hand-authored — and that is labelled, not disguised**
+(constitution II). They are an editorial heuristic ("we think barbershops and cafes pair"), *not*
+a measurement. Two honest options: ship them as clearly-marked editorial weights, or later derive
+them from Overture **co-location lift** (which categories actually co-occur with thriving cafes) —
+the second is measured but heavier. MVP is the labelled heuristic; the map/tile must say "editorial
+affinity," never present it as data. Starter dictionaries to author: cafe/coffee ← {hairdresser,
+books, gym, coworking, art} +, {cafe, fast_food} −; bakery ← {supermarket, school, kindergarten} +;
+pharmacy ← {clinic, doctors, supermarket} +; etc.
+
+**Rubric**: differentiates the advice, cheap (proven UDF), showcases a ClickHouse feature nothing
+else uses. **Order: after F2** (cheap, high showcase-per-hour).
+
+### Suggested order, once F1 lands and is verified in-browser
+
+`F2 (bonus prize, infra ready) → F5 (cheap, UDF showcase) → F3 (history + MV, the volume flex) →
+F4 (dashboard, integrates all, grows incrementally)`. Each goes through a spec and an agent
+workflow (constitution VII). None is scheduled against a day number — the clock is checked with
+`date -u`, and at time of writing there are ~5 d 22 h left.
+
 ## What we are NOT building — decided now, so it isn't relitigated at 2am
 
 | Cut | Why |
