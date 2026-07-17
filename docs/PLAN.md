@@ -319,12 +319,27 @@ If we are writing code on day 7, something went wrong on day 2.
 
 ---
 
-## Researched feature backlog — all requested 17 July, all verified against live systems
+## Researched feature backlog — all requested 17 July → **all shipped and verified in-browser**
+
+**STATUS (17 July): F1–F5 are built, browser-verified, and merged to `main`.** Each went through a
+spec + an agent workflow (constitution VII), each gate (typecheck + `verify:score` + shellcheck)
+green, each adversarial-review finding fixed. Final CI-equivalent sweep passed: gitleaks clean over
+all commits, no tracked secrets, shellcheck clean, docs links resolve, `verify:score` 0 mismatches
+across all three cities. The descriptions below are kept as the record of *why* each was built and
+what was verified live before it was.
 
 Five features were requested and the product owner considers all of them needed. Each was
 **de-risked against the live service before being written here** (constitution II/III) — the
 verification command and its output are recorded, not a doc claim. They are ranked against the
 rubric (constitution VI) and ordered by dependency, not by how interesting they are.
+
+| Feature | Shipped as | Verified in-browser |
+|---|---|---|
+| F1 walk catchment + Accessibility | `feat(web): walk catchment layer…` | street-following contour, 3rd slider, not-measured state |
+| F2 saved-site history (OLTP+OLAP) | `feat(web): saved-site history…` | save→CDC→compare, market gap fills in seconds |
+| F5 complementary affinity | `feat(web): complementary-business affinity…` | editorial-tagged neighbours per pick |
+| F3 historical momentum | `feat(web): historical momentum…` | rising/flat/saturating sparkline, honest "since '22" |
+| F4 dashboard metrics | `feat(web): market-at-a-glance…` | 4 tiles, reactive to the weight sliders |
 
 **Where ClickHouse's showcase features actually belong** (asked directly, answered honestly):
 we currently use MATERIALIZED **columns** (`h3_8/h3_9 = geoToH3(...)`, the lat/lon-trap
