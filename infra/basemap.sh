@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/infra/lib.sh"
 
 BUCKET="wherehouse-basemaps"
-HOSTNAME_PUBLIC="wherehouse.slim-shaggy.com"
+HOSTNAME_PUBLIC="basemap.slim-shaggy.com"
 WORKER_DIR="$ROOT/infra/basemap-worker"
 BUILD_DIR="${BUILD_DIR:-$ROOT/.basemap}"   # gitignored: .pmtiles are build artifacts
 

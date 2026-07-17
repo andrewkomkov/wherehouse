@@ -67,7 +67,7 @@ retired on day 2 as intended.
 
 Also landed: 211,818 Overture POIs across the three cities (H3 verified by distance —
 worst case 556 m at res 8, 210 m at res 9); Berlin PMTiles live on
-`wherehouse.slim-shaggy.com` (30.8 MB, cut in 20.3 s; a real tile returns 200 / 198 KB / 100 ms).
+`basemap.slim-shaggy.com` (30.8 MB, cut in 20.3 s; a real tile returns 200 / 198 KB / 100 ms).
 
 **What day 2 broke:** ADR-001 claimed the full payload goes to the UI. There is a **1 MiB
 per-record cap** on the chat stream and we already exceed it — Berlin food & drink is
@@ -99,7 +99,7 @@ No styling. No basemap tuning. No scoring. One dot.
   `ORDER BY mortonEncode(...)`, H3 in **MATERIALIZED** columns (constitution II — this is
   where the lat/lon trap lives)
 - ~~Berlin PMTiles extract → R2 + the Protomaps Worker on a custom domain~~ **DONE** —
-  live at `https://wherehouse.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt`, 30.8 MB cut in 20.3 s,
+  live at `https://basemap.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt`, 30.8 MB cut in 20.3 s,
   rebuildable with `./infra/basemap.sh`
 
 **Exit gate:** a dot appears on a map, driven by a ClickHouse query, streamed through

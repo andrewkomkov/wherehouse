@@ -21,7 +21,7 @@ const EMPTY_GEOJSON: GeoJSON.FeatureCollection = {
 
 // Our own Protomaps tiles out of R2 (infra/basemap.sh). The extract stops at z14,
 // so maxzoom must say so or MapLibre asks for tiles that were never cut.
-const BASEMAP_TILES = "https://wherehouse.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt";
+const BASEMAP_TILES = "https://basemap.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt";
 const PM_ASSETS = "https://protomaps.github.io/basemaps-assets";
 
 function useMap(container: React.RefObject<HTMLDivElement | null>) {

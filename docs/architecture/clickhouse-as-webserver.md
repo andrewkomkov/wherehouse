@@ -132,6 +132,13 @@ Leaning **A**, with a Cloudflare Worker in front purely to give it a pretty host
 (`wherehouse.slim-shaggy.com` → rewrite to the `?query=` URL). That keeps the claim
 literally true — every byte originates from ClickHouse — while being demoable.
 
+**`wherehouse.slim-shaggy.com` is reserved for this and nothing else.** The basemap
+briefly squatted on it (18 July) and was moved to `basemap.slim-shaggy.com`, because a
+hostname that reads like the product should serve the product. The two are unrelated:
+the basemap is static OSM tiles out of R2 with no ClickHouse in the path, whereas this
+hostname must serve bytes that originate in a `MergeTree` row. Don't let anything else
+take it.
+
 ## Why this is defensible, not a gimmick
 
 The rules require ClickHouse as the **primary database**. This goes further: it is

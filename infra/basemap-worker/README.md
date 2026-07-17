@@ -3,7 +3,7 @@
 Serves the Berlin (and later Amsterdam/Belgrade) Protomaps basemap out of the R2 bucket
 `wherehouse-basemaps` as `/{name}/{z}/{x}/{y}.mvt`, plus `/{name}.json` TileJSON.
 
-Live: <https://wherehouse.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt>
+Live: <https://basemap.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt>
 
 Don't deploy this by hand — `./infra/basemap.sh` owns the whole pipeline (cut → upload →
 deploy → verify) and is idempotent. `wrangler deploy` here only covers the last step.
@@ -11,7 +11,7 @@ deploy → verify) and is idempotent. `wrangler deploy` here only covers the las
 ## Why a custom domain
 
 The Cache API is inert on `*.workers.dev`, so every tile would re-read R2. On
-`wherehouse.slim-shaggy.com` a repeat GET returns `cf-cache-status: HIT`. See
+`basemap.slim-shaggy.com` a repeat GET returns `cf-cache-status: HIT`. See
 `docs/research/findings.md` §6.
 
 ## Provenance

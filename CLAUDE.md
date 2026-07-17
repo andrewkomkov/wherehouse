@@ -196,7 +196,7 @@ Read these before writing any geo SQL. Each cost real time today.
   `curl -s "https://overturemaps-us-west-2.s3.amazonaws.com/?list-type=2&delimiter=/&prefix=release/"`
 - Berlin metro basemap (Protomaps PMTiles, z0–14) is **30.8 MB, cut in 20.3 s** (measured;
   the old "5.8 s" was a `--dry-run`, which never downloads). Three cities < 100 MB.
-  **Already built and live** at `https://wherehouse.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt` —
+  **Already built and live** at `https://basemap.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt` —
   rebuild with `./infra/basemap.sh`.
 - ClickHouse has **no routing**. Valhalla alongside. Bridge:
   `h3PolygonToCells(isochrone, 8)` → `WHERE h3_8 IN (…)` turns geometry into an indexed
@@ -219,7 +219,7 @@ through the **Cloud REST API**, never the console, and lives in `infra/`:
 ```
 
 The basemap lives on **Cloudflare**, not ClickHouse: R2 bucket `wherehouse-basemaps` +
-worker `wherehouse-basemap` on `wherehouse.slim-shaggy.com` (`infra/basemap-worker/`, the
+worker `wherehouse-basemap` on `basemap.slim-shaggy.com` (`infra/basemap-worker/`, the
 upstream Protomaps worker vendored). Auth is wrangler OAuth (`wrangler login`) — there is
 no Cloudflare credential in `.env`, so `check-env.sh` does not cover it. Adding a city =
 one line in the `CITIES` array in `infra/basemap.sh`.
