@@ -14,6 +14,22 @@ The repo is currently **research + scaffolding**. No application code yet — re
 `docs/research/findings.md` first, it is the distilled output of five research agents
 plus live verification against our own ClickHouse service.
 
+## Start here in a new session
+
+```sh
+./infra/check-env.sh    # verifies every credential against the live services, ~5s
+```
+
+Everything is in `.env` (gitignored): ClickHouse, the public read-only `site` user,
+the Cloud API key, managed Postgres, Trigger.dev. `.secrets/pg-ca.crt` holds the Postgres
+CA. **`ANTHROPIC_API_KEY` is not set yet** — `chat.agent()` needs it.
+
+Two traps this script exists to catch:
+- **`POSTGRES_URL` must stay quoted in `.env`** — an unquoted `&` aborts `source .env` and
+  silently drops every line below it (looked exactly like a missing Trigger.dev key).
+- The ClickHouse service **idles after 15 min**; the first query wakes it and may be slow.
+  A single timeout is not an outage.
+
 ## Where we are
 
 [`docs/PLAN.md`](docs/PLAN.md) is the day-by-day plan to the deadline, what's explicitly
