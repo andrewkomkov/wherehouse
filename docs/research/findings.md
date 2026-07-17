@@ -61,6 +61,18 @@ to `streamText` — otherwise `toModelOutput` runs on turn 1 and is silently ski
 Auth: backend `TRIGGER_SECRET_KEY`; frontend gets short-lived scoped public tokens via
 `auth.createPublicToken({ scopes: { read: { sessions: chatId } } })`.
 
+**We supply the LLM key** (verified 17 Jul). Trigger.dev provides **no** hosted model, AI
+gateway, or bundled LLM credits — it's orchestration; the model comes from the Vercel AI
+SDK with our own provider key. **Hackathon credits don't cover inference**: $400 is
+ClickHouse, $100 is Trigger.dev *compute* (task runs). LLM tokens bill to us — a few
+dollars for a demo week, but `ANTHROPIC_API_KEY` must exist before day 2 or the skeleton
+stalls at step one.
+
+Useful: their dashboard has a **Models** page — model catalogue with per-1M-token pricing,
+plus a "Your models" tab showing our own usage, cost and **cache-hit** sparklines. That's
+observability, not provisioning — but it's a good demo beat (show the judges what an answer
+actually costs) and it confirms prompt caching is tracked.
+
 `chat.headStart` cuts time-to-first-chunk ~2.8s → ~1.2s. Worth it for demo feel.
 
 Docs: [ai-chat/reference](https://trigger.dev/docs/ai-chat/reference) ·
