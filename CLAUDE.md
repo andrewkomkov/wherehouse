@@ -129,6 +129,49 @@ Read these before writing any geo SQL. Each cost real time today.
   `max_time_contour ≥ 480`. Its `recolorAtdi()` client-side re-weighting pattern is
   directly reusable.
 
+## Infrastructure is code — keep it that way
+
+Everything (ClickHouse service, managed Postgres, ClickPipes CDC) was provisioned
+through the **Cloud REST API**, never the console, and lives in `infra/`:
+
+```sh
+./infra/status.sh                 # read-only: what's running, versions, CDC freshness
+./infra/provision.sh              # rebuild everything from nothing (idempotent)
+./infra/teardown.sh               # destroy billables (run after judging, 29 July)
+```
+
+**Rule: if you change infrastructure, change `infra/` in the same breath.** A console
+click is a bug — the deadline is server-enforced, and if the service has to be recreated
+at 2am on 22 July that must be one command, not archaeology.
+
+The live OpenAPI spec at `https://api.clickhouse.cloud/v1` is ground truth — read it
+instead of guessing field names.
+
+There is a dedicated subagent for this: **`infra-keeper`** (`.claude/agents/`). Use it
+for provisioning, diagnosing CDC/pipe failures, spend checks and teardown; it carries
+the accumulated API gotchas.
+
+Shell style note: `cmd | python3 - <<'PY'` **steals stdin** and the pipe never arrives.
+Use `cmd | python3 -c "$(cat <<'PY' … PY)"`. This bit us in `status.sh`.
+
+## CI and releases
+
+`.github/workflows/ci.yml` runs on every push/PR:
+- **gitleaks + a tracked-credentials check** — the load-bearing job. The repo goes public
+  on 23 July with live keys in a local `.env`; this is the seatbelt. Never weaken it.
+- **shellcheck** on `infra/*.sh` (`--severity=warning`, currently clean)
+- **sql sanity** — applies `db/postgres/001_oltp_schema.sql` to a real `postgres:18-alpine`
+  service container and asserts publication `wherehouse_pub` exists (CDC breaks without it).
+  No credentials needed.
+- **docs links** — relative markdown links must resolve.
+
+Releases are automated by [release-please](https://github.com/googleapis/release-please)
+from Conventional Commits (`release-please-config.json`, `.release-please-manifest.json`).
+Merging the `chore: release main` PR tags and updates `CHANGELOG.md`. Note the repo
+setting `default_workflow_permissions=write` + `can_approve_pull_request_reviews=true`
+had to be enabled via the API — without it release-please fails with
+*"GitHub Actions is not permitted to create or approve pull requests"*.
+
 ## Conventions
 
 - Conventional Commits; description lowercase, imperative, no trailing period.
