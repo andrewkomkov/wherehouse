@@ -8,6 +8,8 @@ node_modules/
 dist/
 build/
 .next/
+*.tsbuildinfo
+next-env.d.ts
 .turbo/
 .trigger/
 .wrangler/
@@ -16,6 +18,8 @@ build/
 data/
 *.pbf
 *.pmtiles
+# cut basemap extracts — rebuildable with ./infra/basemap.sh extract
+.basemap/
 *.parquet
 .venv/
 __pycache__/
