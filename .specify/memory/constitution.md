@@ -99,6 +99,30 @@ ClickHouse & Trigger.dev 25% · Problem Fit 20% · Technical Implementation 20% 
 Innovation 20% · Scalability 10% · Presentation 5%), not against how interesting they are.
 A feature that doesn't move a criterion doesn't get built.
 
+### VII. Work is executed through agents, and reproducible from a script
+
+Non-trivial work is done by **agents orchestrated from a script**, not by hand-driving a
+terminal. The script is the record: re-running it reproduces the result, and reading it
+explains how the result was reached — without archaeology.
+
+This generalises Principle IV from infrastructure to *everything*. "A console click is a
+bug" because it evaporates the moment the thing must be rebuilt; a manual sequence of edits
+and commands is the same bug wearing different clothes. If the only account of how something
+was built lives in a person's memory or a scrollback buffer, it is not reproducible — and on
+a server-enforced deadline, at 2am on the 22nd, that is the risk that ends the build.
+
+Two rules follow:
+
+1. **Prefer orchestrating agents over doing the work inline**, and **persist the
+   orchestration** — the Workflow script, the `infra/` script, the check — so it can be
+   re-run and audited. A swarm that ran once and left no script is a console click.
+2. **Every deliverable must be regenerable by one command.** If reproducing it requires
+   remembered steps, the steps are the defect: write them down as a script.
+
+This is not a licence for ceremony on a one-line fix — Principle VI still bounds it, and the
+test is unchanged: *would getting this wrong, or being unable to redo it, cost more than an
+hour?* If yes, an agent does it from a script that survives.
+
 ## Technical Constraints
 
 - **ClickHouse is the primary database.** Not a cache, not a sidecar — a rules requirement.
@@ -150,7 +174,10 @@ Reviews verify compliance. Complexity must be justified against Principle VI.
 Runtime guidance for agents lives in `CLAUDE.md`; where `CLAUDE.md` and this constitution
 disagree, this file wins and `CLAUDE.md` gets fixed.
 
-**Version**: 1.1.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-19
+**Version**: 1.2.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-17
+
+*1.2.0 — Added Principle VII: work is executed through agents orchestrated from a script, and
+every deliverable is reproducible by one command. Generalises IV (infra is code) to all work.*
 
 *1.1.0 — Principle II extended to our own prose, after a spec was found asserting three
 invented district names as measured fact, hours after the agent was corrected for the
