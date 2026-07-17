@@ -12,7 +12,7 @@ preview_bucket_name = "wherehouse-basemaps"
 # Custom domain, not *.workers.dev — the Cache API is inert on workers.dev, so every
 # tile would re-read R2. See docs/research/findings.md §6.
 [[routes]]
-pattern = "tiles.slim-shaggy.com"
+pattern = "wherehouse.slim-shaggy.com"
 custom_domain = true
 
 [vars]

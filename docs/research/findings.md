@@ -226,7 +226,7 @@ unratified hypotheses), Russian data sources, hardcoded host paths.
 
 ## 6. Basemap — Protomaps PMTiles on R2
 
-**BUILT AND VERIFIED** (17 Jul) — live at `https://tiles.slim-shaggy.com`, provisioned by
+**BUILT AND VERIFIED** (17 Jul) — live at `https://wherehouse.slim-shaggy.com`, provisioned by
 `./infra/basemap.sh`. Executed numbers, from the real cut of build `20260717`:
 
 | extract | zooms | size | time | note |
