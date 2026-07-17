@@ -1,0 +1,20 @@
+.env
+.env.local
+# raw credential drops — repo goes public at submission
+*api-key*.txt
+*credentials*.json
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+.trigger/
+.wrangler/
+*.log
+.DS_Store
+data/
+*.pbf
+*.pmtiles
+*.parquet
+.venv/
+__pycache__/
