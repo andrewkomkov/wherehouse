@@ -45,7 +45,25 @@ Ask, in the chat:
    returning the GeoJSON, and confirm no `ChatChunkTooLargeError` in the Trigger.dev run log.
 4. **The text is at most two sentences** and never narrates coordinates (SC-006).
 5. **Kontur attribution is visible** (FR-017 — licence obligation).
-6. **Reload the page**: the map is still there (parts are persisted, non-transient).
+6. **The answer names no districts.** See below — this is the one that actually failed.
+7. ~~Reload the page: the map is still there.~~ **Cut** — a reload starts a fresh session. It
+   was tested, found false, and descoped rather than left as an unverified claim. See the
+   spec's Out of Scope table.
+
+### The failure this gate is really for is the prose, not the map
+
+On the first live run the map was correct and the sentence said all three picks were in
+**Spandau** — the opposite side of Berlin from where the pins actually were. The tools return
+`gap`/`population`/`competitor count` and **no place names**, so asked to name an area the
+model invented one that sounded right. A confident, checkable, wrong claim is worse than
+saying less, and it is exactly what a Berlin-literate judge would catch first.
+
+The system prompt now forbids naming any district, neighbourhood or street. **If you ever see
+a place name in the answer, that guard has regressed** — the map may still be right, but the
+answer is no longer trustworthy. Expected shape of a good answer:
+
+> Each of the three top spots sits in an underserved area with no nearby competitors,
+> serving between 5,860 and 6,826 people. The map shows where they are.
 
 ## Verifying the answer is defensible, not just pretty
 

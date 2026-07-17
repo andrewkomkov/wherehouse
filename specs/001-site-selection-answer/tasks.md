@@ -33,7 +33,7 @@ by triple-run hash. These tasks are assembly, not discovery.
 
 **Purpose**: the browser needs to reach ClickHouse as `site`.
 
-- [ ] T001 Add the frontend ClickHouse contract to `.env.example` and set the real values in
+- [X] T001 Add the frontend ClickHouse contract to `.env.example` and set the real values in
       `.env`: `NEXT_PUBLIC_CLICKHOUSE_URL`, `NEXT_PUBLIC_CLICKHOUSE_SITE_USER`,
       `NEXT_PUBLIC_CLICKHOUSE_SITE_PASSWORD`. The `site` password is a **public token by
       design** (ADR-003, R8) — it ships in the client bundle and that is safe, because
@@ -50,16 +50,16 @@ by triple-run hash. These tasks are assembly, not discovery.
 **⚠️ CRITICAL**: no user story can begin until this phase is complete. T005 in particular is
 what stands between the demo and `ChatChunkTooLargeError`.
 
-- [ ] T002 Create `db/clickhouse/004_layers_schema.sql` — `web.layers (id String, body String,
+- [X] T002 Create `db/clickhouse/004_layers_schema.sql` — `web.layers (id String, body String,
       created_at DateTime DEFAULT now())`, `ENGINE = MergeTree ORDER BY id`,
       `TTL created_at + INTERVAL 1 HOUR` (FR-015). Table goes in `web` **deliberately**:
       `GRANT SELECT ON web.*` is a wildcard that already covers it, so this needs **zero
       access DDL** — verified by canary (R2). Comment that in the file: it is the trap-#4
       mitigation, and the next person will be tempted to "fix permissions" with a `GRANT`.
-- [ ] T003 Create `infra/load-layers.sh` applying T002, idempotent, verifying the table exists
+- [X] T003 Create `infra/load-layers.sh` applying T002, idempotent, verifying the table exists
       afterwards (constitution IV — a console click is a bug). Follow the shape of the
       existing `infra/*.sh`; `shellcheck --severity=warning` must stay clean (CI gates on it).
-- [ ] T004 [P] Create `web/src/trigger/scoring.ts` — the GAP query, **defined exactly once**
+- [X] T004 [P] Create `web/src/trigger/scoring.ts` — the GAP query, **defined exactly once**
       (both `scoreArea` and `rankSites` use it; two copies would drift). Includes the city
       registry: bbox + population country for `berlin`(DE) / `amsterdam`(NL) / `belgrade`(RS).
       Per [data-model.md](./data-model.md): ring supply via `h3kRing(h3_8, 1)` (FR-006), p95
@@ -68,13 +68,13 @@ what stands between the demo and `ChatChunkTooLargeError`.
       ⚠️ **The bbox filter is where the new trap lives**: `h3ToGeo(h3).1` is **LAT**, `.2` is
       **LON**. Swapped ⇒ zero rows, **no error**. Reference SQL is in
       [quickstart.md](./quickstart.md) and it is verified — copy it, don't re-derive it.
-- [ ] T005 [P] Create `web/src/trigger/layers.ts` — `emitLayer(id, label, geojson)`:
+- [X] T005 [P] Create `web/src/trigger/layers.ts` — `emitLayer(id, label, geojson)`:
       serialize, **measure `body.length`**, `≤ 256 KiB` → inline part, `>` → `INSERT` into
       `web.layers` and emit a handle part; return `{ rowCount }` (ADR-001 — the model never
       sees geometry). The decision is on **measured bytes, never a row count** (FR-012) —
       a category with long names breaks any row-count guess. Contract:
       [contracts/layer-parts.md](./contracts/layer-parts.md).
-- [ ] T006 Rewrite the types in `web/src/trigger/chat.ts` and **delete `showSavedSites`**
+- [X] T006 Rewrite the types in `web/src/trigger/chat.ts` and **delete `showSavedSites`**
       (FR-020) — it was built to exercise the ADR-001 gate, the gate passed on day 2, and its
       deliberate double-write is a defect in a real tool. Add `LayerId` and the `MapData`
       inline|handle union. ⚠️ Keep the type **bare** (`type WhereHouseDataTypes = { map: MapData }`)
@@ -96,30 +96,30 @@ failure. This is the day-3 exit gate and the demo video's first shot.
 **Note on ordering**: T007–T010 all edit `chat.ts`, so they are **not** parallel with each
 other. That is a real conflict, not caution.
 
-- [ ] T007 [US1] Implement `findCompetitors` in `web/src/trigger/chat.ts` — competitor dots,
+- [X] T007 [US1] Implement `findCompetitors` in `web/src/trigger/chat.ts` — competitor dots,
       emits layer `competitors` via `emitLayer`. Returns `{ rowCount, bbox }`.
       *Measured: 1,460 rows · 430 ms · 175 KiB ⇒ inline.*
-- [ ] T008 [US1] Implement `scoreArea` in `web/src/trigger/chat.ts` — H3 res-8 GAP choropleth
+- [X] T008 [US1] Implement `scoreArea` in `web/src/trigger/chat.ts` — H3 res-8 GAP choropleth
       from `scoring.ts`, emits layer `opportunity`. Returns `{ cellCount, topGap, medianGap }`.
       *Measured: 2,260 cells · 700 ms · **549 KiB ⇒ handle path**, every time (FR-014).*
-- [ ] T009 [US1] Implement `rankSites` in `web/src/trigger/chat.ts` — top 3 from `scoring.ts`,
+- [X] T009 [US1] Implement `rankSites` in `web/src/trigger/chat.ts` — top 3 from `scoring.ts`,
       emits layer `picks`. Each pick carries `{ rank, gap, pop, sup }` so a sceptic can
       recompute the ranking by hand (FR-003).
-- [ ] T010 [US1] Wire the three tools into the agent config in `web/src/trigger/chat.ts`.
+- [X] T010 [US1] Wire the three tools into the agent config in `web/src/trigger/chat.ts`.
       ⚠️ Tools MUST be declared on the agent config (`tools:`), not only passed to
       `streamText` — otherwise `toModelOutput` runs on turn 1 and is **silently skipped**
       afterwards (ADR-001). System prompt: the map is the answer, at most two sentences, never
       narrate coordinates (constitution I, SC-006).
-- [ ] T011 [US1] Render the three layers in `web/src/components/chat.tsx`: `opportunity` fill
+- [X] T011 [US1] Render the three layers in `web/src/components/chat.tsx`: `opportunity` fill
       ramped on `properties.gap` (bottom), `competitors` circles (middle), `picks` ranked
       symbols (top). Resolve `handle` parts by fetching from ClickHouse directly — the exact
       GET is in [contracts/layer-parts.md](./contracts/layer-parts.md), verified at 550 ms.
       Show `label`/`rowCount` immediately, paint when the fetch lands. Remove the day-2
       "ADR-001 gate" debug box — the gate has passed.
-- [ ] T012 [P] [US1] Create `web/src/components/attribution.tsx` — Kontur CC BY 4.0, visible on
+- [X] T012 [P] [US1] Create `web/src/components/attribution.tsx` — Kontur CC BY 4.0, visible on
       every view showing the map (FR-017: a **licence obligation**, not a courtesy), and state
       the population is a **2023-11-01 snapshot** so the UI never implies live demand (FR-018).
-- [ ] T013 [US1] Run the exit gate in [quickstart.md](./quickstart.md): three layers, arriving
+- [X] T013 [US1] Run the exit gate in [quickstart.md](./quickstart.md): three layers, arriving
       progressively, no `ChatChunkTooLargeError`, ≤2 sentences, attribution visible, map
       survives a reload. **Hand-verify the top-3 against the reference SQL** — if the pins
       disagree with that query, the agent is wrong. Expected: Mariendorf, Hellersdorf,
@@ -141,11 +141,17 @@ this alone.
 already exercises the handle path on every question. What remains is letting a user *ask* for
 a wide layer, and proving the cap is genuinely dead.
 
-- [ ] T014 [US2] Support category groups in `web/src/trigger/chat.ts` (e.g. "restaurants",
+- [X] T014 [US2] Support category groups in `web/src/trigger/chat.ts` (e.g. "restaurants",
       "food & drink" → a category set), so a wide layer is reachable from a normal question.
-- [ ] T015 [US2] Verify SC-003 against the widest layer in the data — every Berlin POI,
-      **139,807 features / 14.9 MiB, 14× the cap**. Must render, must not fail. This is the
-      failure a judge will find if we don't.
+- [~] T015 [US2] Verify SC-003 against the widest layer in the data.
+      **Done, partially — say what was actually run.** Verified live: "all food and drink" =
+      6,664 features / **781 KiB**, over budget, handle path, renders, run completes. The
+      **14.9 MiB** every-Berlin-POI case was NOT run through the UI: no question reaches it,
+      because "everything" is not a trade and no category group covers it.
+      The risk is nonetheless retired by construction rather than by that test: over budget,
+      the payload never touches the stream — only the handle does — so stream size is constant
+      regardless of layer size. 14.9 MiB would exercise the ClickHouse INSERT and the browser
+      fetch, not the cap. Left open deliberately rather than marked done.
 
 **Checkpoint**: no question a user can ask can kill the run.
 
@@ -162,10 +168,10 @@ one const array for three cities, and splitting it across stories would be theat
 cities' data is already loaded and verified, so what actually remains here is the *honesty*
 path and the proof.
 
-- [ ] T016 [US3] Handle unheld cities and categories in `web/src/trigger/chat.ts` — return
+- [X] T016 [US3] Handle unheld cities and categories in `web/src/trigger/chat.ts` — return
       `{ error: "unavailable", available: [...] }` and have the agent say so plainly.
       **Never render an empty map**: it reads as "nowhere is good", which is a lie (FR-005).
-- [ ] T017 [US3] Verify a pharmacy in Amsterdam and a kindergarten in Belgrade produce layers
+- [X] T017 [US3] Verify a pharmacy in Amsterdam and a kindergarten in Belgrade produce layers
       for the right city, category and population country (NL / RS).
 
 **Checkpoint**: the answer is a system, not a Berlin hardcode.
@@ -174,13 +180,13 @@ path and the proof.
 
 ## Phase 6: Polish & cross-cutting
 
-- [ ] T018 [P] Update `docs/architecture/progressive-map.md` (ADR-001): the 1 MiB section is
+- [X] T018 [P] Update `docs/architecture/progressive-map.md` (ADR-001): the 1 MiB section is
       no longer an open problem — record the handle path as **proven** (549 KiB round-trip,
       byte-identical, 770 ms in / 550 ms out) and mark the seven-wave choreography's status
       honestly against what actually shipped.
-- [ ] T019 [P] Update `docs/PLAN.md`: mark day 3 done with its measured outcome, and hand day
+- [X] T019 [P] Update `docs/PLAN.md`: mark day 3 done with its measured outcome, and hand day
       4 what it needs (isochrones snap to `h3_9`, already MATERIALIZED).
-- [ ] T020 Run `pnpm typecheck` in `web/` and re-run the full [quickstart.md](./quickstart.md)
+- [X] T020 Run `pnpm typecheck` in `web/` and re-run the full [quickstart.md](./quickstart.md)
       end to end.
 
 ---

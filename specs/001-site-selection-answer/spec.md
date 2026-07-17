@@ -98,8 +98,9 @@ three layers arrive on one map, each driven by a real ClickHouse query, with no 
    its score, so the ranking can be checked by hand.
 3. **Given** the layers are still arriving, **When** the user watches, **Then** each layer
    appears as its work completes rather than all at once at the end.
-4. **Given** the answer has finished, **When** the user reloads the page, **Then** the map is
-   still there.
+4. ~~**Given** the answer has finished, **When** the user reloads the page, **Then** the map
+   is still there.~~ **CUT 19 July — see Out of Scope.** Verified false on the first live run
+   and descoped rather than left as a claim.
 
 ---
 
@@ -303,6 +304,7 @@ Stated explicitly so it is not relitigated at 2am:
 | **Per-category ring radius, rent, footfall, land use, competitor quality** | Each is a real modelling improvement and none fit before 21 July. The score's honesty comes from stating what it omits, not from omitting less. |
 | **Client-side slider re-weighting** | Day 5 if time allows. |
 | **Resolution-9 choropleth** | Measured at ~2.2 MiB, and res-8 is already at the limit of what reads well as a city-wide surface. No rubric criterion moves. |
+| **Surviving a page reload** (was US1 scenario 4) | **Cut 19 July, after testing it.** ADR-001 listed this as *assumed*; it is false. `useChat` mints a new `chatId` per mount, so a reload starts a fresh session. The SDK does support hydration (`sessions` + `onSessionChange` + `reconnectToStream`), but that resumes a **live stream** — a *finished* answer has no stream to resume, so restoring a completed map means replaying persisted parts, which is real work of uncertain size. It moves no rubric criterion and no demo reloads mid-answer. Revisit only if days 4-5 come in early. |
 | **Vector tiles (MVT) from SQL** | Needs ClickHouse 26.6; Cloud is on 26.4 and trails ~2 releases. GeoJSON is fine at 3 cities. |
 | **Any category-inference model** | A synonym map answers the demo questions; an LLM taxonomy mapper is a day of work for zero rubric points. |
 
