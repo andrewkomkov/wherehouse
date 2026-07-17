@@ -64,9 +64,39 @@ Auth: backend `TRIGGER_SECRET_KEY`; frontend gets short-lived scoped public toke
 **We supply the LLM key** (verified 17 Jul). Trigger.dev provides **no** hosted model, AI
 gateway, or bundled LLM credits — it's orchestration; the model comes from the Vercel AI
 SDK with our own provider key. **Hackathon credits don't cover inference**: $400 is
-ClickHouse, $100 is Trigger.dev *compute* (task runs). LLM tokens bill to us — a few
-dollars for a demo week, but `ANTHROPIC_API_KEY` must exist before day 2 or the skeleton
-stalls at step one.
+ClickHouse, $100 is Trigger.dev *compute* (task runs). LLM tokens bill to us.
+
+### Model: DeepSeek via its Anthropic-compatible endpoint (verified live)
+
+`POST https://api.deepseek.com/anthropic/v1/messages` → **200**, returning a genuine
+Anthropic-shaped body (`{type:"message", content:[{type:"thinking"},{type:"text"}]}`).
+`/v1/messages` (without `/anthropic`) → 404. The OpenAI-compatible path
+(`/chat/completions`) also works, but the Anthropic one lets us use `@ai-sdk/anthropic`
+untouched:
+
+```ts
+createAnthropic({ apiKey: env.ANTHROPIC_API_KEY, baseURL: env.ANTHROPIC_BASE_URL })
+```
+Switching to real Anthropic later = drop `ANTHROPIC_BASE_URL`, swap key + `LLM_MODEL`.
+
+| `deepseek-v4-flash` | |
+|---|---|
+| context / max output | **1M** / 384K |
+| input, cache **miss** | $0.14 / 1M |
+| input, cache **hit** | **$0.0028 / 1M — 50× cheaper** |
+| output | $0.28 / 1M |
+
+Balance was **$4.88** on 17 Jul ≈ ~35M input tokens. `GET /user/balance` to check;
+`./infra/check-env.sh` reports it and warns under $1.
+
+Two notes. **Cache hits are worth chasing** — a stable system prompt across many turns is
+almost all cache, at 1/50th the price. And **the 1M context is largely irrelevant to us**
+by design: ADR-001 keeps big payloads *out* of the model entirely (tools return
+`{ rowCount }`; GeoJSON goes to the UI out-of-band). If we ever need 1M of context,
+something has gone wrong.
+
+⚠️ `deepseek-v4-flash` emits a **`thinking` content block** before `text`. Watch for that
+in AI SDK parsing and in the UI — an unhandled reasoning part could leak into the chat.
 
 Useful: their dashboard has a **Models** page — model catalogue with per-1M-token pricing,
 plus a "Your models" tab showing our own usage, cost and **cache-hit** sparklines. That's
