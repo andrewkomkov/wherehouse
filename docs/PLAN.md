@@ -115,12 +115,23 @@ this is day 2 and not day 5.
 
 Now spec it — `/speckit-specify` the site-selection answer flow, with what day 2 taught us.
 
-**Day 2 hands day 3 two things it must fold in:**
+**Day 2 hands day 3 three things it must fold in:**
 - **The 1 MiB cap is a design input, not a footnote.** Any layer wider than a single
   category needs the ID-reference path (handle on the stream, GeoJSON fetched straight from
   ClickHouse by the browser). Spec it that way from the start rather than retrofitting.
 - The skeleton's `showSavedSites` tool is throwaway — it exists to prove the wire, and its
   deliberate double-write should not survive into the real tools.
+- **`geo.population` exists, so the GAP score has a real demand term** (Kontur, H3 res 8,
+  joins to `geo.places.h3_8` on equality). First run against Berlin bakeries ranks dense
+  residential cells with schools and daycares and zero bakeries — Lichtenrade,
+  Friedrichshagen, Staaken. That is a defensible answer; a POI-density proxy would have
+  pointed at the commercial centre instead.
+
+  **Two known weaknesses for the spec to fix, not inherit:**
+  1. *Supply is cell-local.* A bakery 100 m away in the neighbouring hex counts as zero
+     competition. Real supply must read a `h3kRing`, not a single cell.
+  2. *The saturation constant is invented.* "3 bakeries = saturated" was a throwaway during
+     exploration. Either justify it or normalise supply the same way demand is normalised.
 
 - Agent tools: `findCompetitors`, `scoreArea`, `rankSites` — each emits its own layer
 - The scoring query: H3 res 8, competitor density, GAP formula

@@ -52,6 +52,10 @@ skeleton lives in `web/` (`pnpm dev` + `pnpm exec trigger dev`).
    ClickHouse (ADR-003 proved it serves HTTP with CORS open). Design it in, don't retrofit.
 2. `showSavedSites` in `web/src/trigger/chat.ts` is scaffolding — it double-writes on
    purpose to exercise the gate. Do not let that survive into real tools.
+3. **Demand is now real.** `geo.population` holds Kontur Population — 475k H3 res-8 cells,
+   natively the same unit as `geo.places.h3_8`, so the GAP score joins on equality with no
+   interpolation. `./infra/load-population.sh` (re)loads and verifies it. Attribution
+   (Kontur, CC BY) is **required** wherever the map is shown.
 
 ## Spec-Driven Development — MANDATORY
 
