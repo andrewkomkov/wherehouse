@@ -470,3 +470,75 @@ export function catchmentStatsSql(city: CityName, pickH3: string): string {
        INNER JOIN geo.population p ON p.h3_8 = h3ToParent(ic.reachable_h3_9, 8) AND p.country = '${country}'
      WHERE ic.origin_h3_9 = oc AND ic.minutes = 10 AND ic.city = '${city}') AS reachablePeople`;
 }
+
+/**
+ * Historical momentum for one (city, trade) as a single JSON object — is this market rising, flat,
+ * or saturating? The trend the static GAP snapshot cannot see (008_history.sql).
+ *
+ * ⚠️ RELATIVE momentum from OSM edit history, never an exhaustive absolute count. An OSM count rises
+ * for two reasons this data cannot separate: businesses actually opening, and OSM *mapping* catching
+ * up. So: recent years only (2022+, where coverage is mature), framed as momentum, cross-validated
+ * against our own Overture count (ohsome's 1426 Berlin bakeries vs geo.places' 1460, 2.3% apart,
+ * 2026-07-17). The honest pitch is "rising/flat/saturating?", never "always fresh" — a monthly
+ * rollup of a slow-moving series, not a live feed. The agent MAY state the trend on those terms.
+ *
+ * `category` is the already-resolved single target string (the caller maps the user's word via
+ * CATEGORY_SYNONYMS in chat.ts, as affinityForCellsSql does). The one-column result is a JSON object
+ * the caller parses:
+ *   - `direction`: 'rising' | 'flat' | 'saturating', derived from pctChange with a STATED
+ *     threshold — rising if > +8, saturating if < -8, else flat. Not asserted (FR-004). The three
+ *     Berlin trades the loader checks land on the right side of it: cafe +10.8 (rising),
+ *     bakery -5.2 (flat), ev_charging_station +205.9 (rising/booming).
+ *   - `pctChange`: round(100 * (last - first) / first, 1) read from geo.category_momentum — the
+ *     incremental MV (the ClickHouse showcase), via its argMin/argMax *Merge combinators, NOT
+ *     recomputed here. `null` when the divide is undefined (first = 0) or history is too thin.
+ *   - `monthly`: the full [{month, count}] series from geo.poi_history, arraySort'd by month (~54
+ *     points). Sorted in-array rather than trusting groupArray order, so the sparkline can plot it
+ *     as-is.
+ *   - `enoughHistory`: false when the series has < 12 months. ABSENT ≠ 0: a trade the loader could
+ *     not fetch has no rows at all, so this returns `false` with an empty `monthly` and `null`
+ *     pctChange — the caller renders "not enough history", never a fabricated flat-at-zero trend
+ *     (FR-005). The momentum subquery has no GROUP BY on purpose, so it yields one all-zero row for
+ *     an absent trade rather than no row, keeping the CROSS JOIN — and the result — a single row.
+ *
+ * Measured live 2026-07-17 (Cloud 26.4): berlin/cafe rising +10.8, bakery flat -5.2,
+ * ev_charging_station rising +205.9; an unknown trade → {enoughHistory:false, monthly:[]}.
+ */
+export function categoryTrendSql(city: CityName, category: string): string {
+  const c = city.replace(/'/g, "''");
+  const cat = category.replace(/'/g, "''");
+  return `SELECT concat(
+    '{"direction":', toJSONString(
+      -- Stated threshold (FR-004): rising > +8, saturating < -8, else flat. first_count = 0 (an
+      -- undefined pct) and a thin series both fall through to 'flat'; enoughHistory below is what
+      -- the caller actually gates on, so this stays a valid label either way.
+      multiIf(s.n < 12, 'flat', m.first_count = 0, 'flat', pct > 8, 'rising', pct < -8, 'saturating', 'flat')),
+    ',"pctChange":', if(s.n >= 12 AND m.first_count > 0, toString(pct), 'null'),
+    -- The real start year of the series, so the UI and the model state the true window instead of
+    -- a hardcoded "3 years". ohsome data begins 2022, so this is ~2022 — the span is > 3 years and
+    -- calling it "3Y" was a false claim (constitution II). Say "since <fromYear>" instead.
+    ',"fromYear":', toString(m.from_year),
+    ',"enoughHistory":', if(s.n >= 12, 'true', 'false'),
+    ',"monthly":[', s.monthly, ']}')
+  FROM
+  (
+    SELECT count() AS n,
+      arrayStringConcat(arrayMap(
+        e -> concat('{"month":', toJSONString(toString(e.1)), ',"count":', toString(e.2), '}'),
+        arraySort(e -> e.1, groupArray((month, count)))
+      ), ',') AS monthly
+    FROM geo.poi_history
+    WHERE city = '${c}' AND category = '${cat}'
+  ) AS s
+  CROSS JOIN
+  (
+    -- Read momentum from the incremental MV, not from the raw series (FR-002). No GROUP BY: an
+    -- absent trade returns one all-zero row here, so the CROSS JOIN still yields exactly one row.
+    SELECT argMinMerge(first_count) AS first_count,
+           argMaxMerge(last_count)  AS last_count,
+           toYear(minMerge(first_month)) AS from_year,
+           round(100 * (last_count - first_count) / nullIf(first_count, 0), 1) AS pct
+    FROM geo.category_momentum
+    WHERE city = '${c}' AND category = '${cat}'
+  ) AS m`;
+}

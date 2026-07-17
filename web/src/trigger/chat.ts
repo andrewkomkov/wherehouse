@@ -19,6 +19,7 @@ import {
   savedSitesRowsSql,
   savedSitesGeoJsonSql,
   affinityForCellsSql,
+  categoryTrendSql,
   type CityName,
 } from "./scoring";
 
@@ -35,11 +36,33 @@ const clickhouse = createClient({
   password: process.env.CLICKHOUSE_PASSWORD,
 });
 
+/**
+ * The historical-momentum series behind the sparkline (Feature 004). Rides its own `data-trend`
+ * part to the client (ADR-001) so the full ~54-point series never touches the model context —
+ * the tool hands the model only { direction, pctChange, fromYear }.
+ *
+ * ⚠️ RELATIVE momentum from OSM edit history, never an exhaustive absolute count — see
+ * categoryTrendSql. `pctChange` is null when history is too thin to divide, and `enoughHistory`
+ * is false with an empty `monthly` for a trade the loader never fetched (absent ≠ 0): the client
+ * renders "not enough history", never a fabricated flat-at-zero line. `fromYear` is the real start
+ * year of the series (~2022), so the window is stated truthfully — it spans MORE than three years,
+ * and calling it "3Y" was a false claim (constitution II).
+ */
+type TrendData = {
+  city: string;
+  category: string;
+  direction: "rising" | "flat" | "saturating";
+  pctChange: number | null;
+  fromYear: number;
+  enoughHistory: boolean;
+  monthly: { month: string; count: number }[];
+};
+
 // NB: do NOT write `UIDataTypes & { map: MapData }` as the docs example does.
 // UIDataTypes is Record<string, unknown>, so intersecting widens keyof to
 // `string` — the part type degrades to `data-${string}` with `data: unknown`
-// and the client loses all narrowing. Declare the map bare instead.
-type WhereHouseDataTypes = { map: MapData };
+// and the client loses all narrowing. Declare the parts bare instead.
+type WhereHouseDataTypes = { map: MapData; trend: TrendData };
 
 /**
  * The demo questions ask for trades, not for Overture taxonomy strings. This maps one to the
@@ -505,7 +528,49 @@ const compareSavedSites = tool({
   },
 });
 
-const tools = { findCompetitors, scoreArea, rankSites, showCatchment, saveSite, compareSavedSites };
+const categoryTrend = tool({
+  description:
+    "Show how a trade's numbers have moved over recent years as a sparkline — is this market rising, flat, or saturating? Historical momentum the static GAP snapshot cannot see. Call this after the map tools when the user asks where to open something.",
+  inputSchema: target,
+  execute: async ({ city, category }) => {
+    const c = checkCity(city);
+    if (!c.ok) return c.err;
+    // The trend is measured for ONE trade, not a group: cats[0] is the primary target — the same
+    // fallback affinityForCellsSql uses. A group like "food and drink" trends on "restaurant".
+    const cat = resolveCategories(category)[0];
+
+    // categoryTrendSql returns a single JSON-string column (26.4 has no GeoJSON/JSON row format),
+    // so read it raw and parse — same shape as the GeoJSON tools above.
+    const row = JSON.parse(await queryText(categoryTrendSql(c.city, cat))) as Omit<
+      TrendData,
+      "city" | "category"
+    >;
+
+    // absent != 0: a trade the loader never fetched comes back enoughHistory=false with an empty
+    // series and null pctChange. Emit NOTHING to the sparkline (a drawn flat-at-zero line is a
+    // different, false claim than no line) and hand the model a reason, not a fabricated trend
+    // (FR-005). The prompt forbids the model inventing a direction from this.
+    if (!row.enoughHistory) {
+      return { trend: "not enough history", category: cat };
+    }
+
+    // ADR-001: the ~54-point series rides the data part to the client for the sparkline; the model
+    // sees only the small summary below. Stable id 'trend' so a re-run updates the part in place
+    // rather than appending (the same id-update mechanism as data-map in layers.ts).
+    chat.response.write({
+      type: "data-trend",
+      id: "trend",
+      data: { city: c.city, category: cat, ...row } satisfies TrendData,
+    });
+
+    // Model-facing: direction + the RELATIVE change and the true start year ONLY, never the series.
+    // The prompt binds how these may be stated — relative OSM momentum since fromYear, never an
+    // exhaustive absolute count and never a hardcoded "3 years" (the series is longer than that).
+    return { direction: row.direction, pctChange: row.pctChange, sinceYear: row.fromYear };
+  },
+});
+
+const tools = { findCompetitors, scoreArea, rankSites, showCatchment, saveSite, compareSavedSites, categoryTrend };
 
 /**
  * The system prompt, exported so the naming guard can be EXECUTED against a live model rather
@@ -602,6 +667,18 @@ export const SYSTEM_PROMPT = [
   // relay only trades a tool actually returned. Absent `complementaryNearby` means none nearby —
   // omitted so the model cannot narrate an absence as a measured "fit 0".
   "A pick may carry `complementaryNearby`: the complementary trades already near it. You MAY add this as ONE brief editorial aside (e.g. 'a supermarket and school next door — good bakery neighbours'), but you MUST frame it as complementary/editorial, MUST NOT present it as measured or as a reason the pick ranked, and MUST NOT name a trade that is not in that pick's `complementaryNearby` list. When a pick has no `complementaryNearby`, say nothing about its neighbours — never that it has none as a fact.",
+  // Feature 004, historical momentum. AFTER the map tools, for a 'where should I open X' question
+  // you MAY call categoryTrend for the market's direction over recent years — the trend the static
+  // GAP snapshot cannot see. It is optional garnish, not part of the mandatory map sequence.
+  //
+  // ⚠️ The honest framing is the whole point. categoryTrend measures RELATIVE momentum from OSM
+  // *edit* history: an OSM count rises both when businesses open AND when OSM mapping catches up,
+  // and this data cannot separate the two. So it is a rate of change, never an exhaustive census.
+  // The confound is why the pitch is "rising/flat/saturating?", never "always fresh" or a complete
+  // count of businesses in the city.
+  "After the map tools, for a 'where should I open X' question you MAY call categoryTrend once to add the market's direction over recent years.",
+  "State categoryTrend ONLY as RELATIVE momentum measured from OSM edit history — e.g. 'cafes in Berlin are up about 11% since 2022' or 'bakeries look saturated' — using its `direction`, `pctChange` and `sinceYear`. Say the window truthfully as 'since <sinceYear>' (the series runs from ~2022, MORE than three years); NEVER say a fixed 'three years'. NEVER present it as an exhaustive or absolute count of the businesses in the city, and never claim the numbers are live or always current.",
+  "If categoryTrend returns 'not enough history', say the trend is unknown for that trade and move on. NEVER invent a direction, a percentage or a flat-at-zero trend for a trade it could not measure.",
   "The score is a ranking heuristic over real data, not a measurement. Do not overstate it.",
   "If a tool returns an error, say plainly what is unavailable. Never pretend a map was drawn.",
 ].join(" ");

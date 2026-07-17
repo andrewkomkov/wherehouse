@@ -33,6 +33,10 @@ import {
 type Msg = InferChatUIMessage<typeof whereHouseChat>;
 type MapPart = Extract<Msg["parts"][number], { type: "data-map" }>;
 type LayerData = MapPart["data"];
+// The historical-momentum series (feature 004) rides its own `data-trend` part (ADR-001), so the
+// full ~54-point monthly series reaches the client while the model only ever saw a two-field summary.
+type TrendPart = Extract<Msg["parts"][number], { type: "data-trend" }>;
+type TrendData = TrendPart["data"];
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
@@ -395,6 +399,24 @@ export function Chat() {
   const signature = [...latest.values()]
     .map((d) => `${d.layer}:${d.kind === "handle" ? d.handle : d.rowCount}`)
     .join("|");
+
+  // The latest momentum series (feature 004). Same last-write-wins as the map parts — the tool
+  // writes a stable id 'trend', so a re-run updates it in place. Absent until categoryTrend runs,
+  // and absent (not a flat-at-zero line) for a trade with too little history: the tool emits no
+  // part at all in that case, so `trend` simply stays undefined and the block does not render.
+  const trend = useMemo(() => {
+    // Scope to the CURRENT answer: read the trend from the LAST assistant message only. Scanning
+    // every message kept a prior question's sparkline on screen next to a later answer that emitted
+    // no trend part — a stale claim. A new answer without a trend now correctly shows none.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "assistant") continue;
+      let out: TrendData | undefined;
+      for (const p of m.parts) if (p.type === "data-trend") out = p.data;
+      return out;
+    }
+    return undefined;
+  }, [messages]);
 
   /** The p95 scalars this answer was scored with. Only the opportunity layer carries them. */
   const scale: Scale | undefined = latest.get("opportunity")?.scale;
@@ -921,6 +943,11 @@ export function Chat() {
             </div>
           </div>
         )}
+
+        {/* Historical momentum (feature 004): the direction badge + sparkline of the OSM-history
+            series the categoryTrend tool streamed, sat in the answer area next to the caption's
+            measured/estimated chips. A market's trend the static GAP snapshot cannot see. */}
+        {trend && <TrendSparkline trend={trend} />}
 
         {error && (
           <div style={{ color: C.competitor, fontSize: 12, fontFamily: MONO }}>{error}</div>
@@ -1657,6 +1684,123 @@ function Chip({ children, tone }: { children: React.ReactNode; tone?: "accent" }
     >
       {children}
     </span>
+  );
+}
+
+/**
+ * Historical momentum (feature 004): a rising/flat/saturating badge + an inline sparkline of the
+ * monthly OSM-history series the categoryTrend tool streams on its own `data-trend` part (ADR-001).
+ * The model only ever saw { direction, pctChange3y }; the ~54-point series rode straight to here.
+ *
+ * Honesty (constitution II): this is RELATIVE momentum measured from OSM edit history, not an
+ * exhaustive absolute count, so the source line names where it came from and the badge only states
+ * which way the market moved — it never claims the numbers are live or always fresh. When a trade
+ * had too little history the series is empty (`enoughHistory` false) and we draw "not enough
+ * history", never a fabricated flat-at-zero line (absent != 0, FR-005).
+ *
+ * Colour: rising takes the teal accent — a market opening up. Flat and saturating take a muted grey.
+ * Never the pick yellow, which is spent once, on the #1 (see the `C.win` note).
+ */
+function TrendSparkline({ trend }: { trend: TrendData }) {
+  const rising = trend.direction === "rising";
+  const badge =
+    trend.direction === "rising"
+      ? "RISING"
+      : trend.direction === "saturating"
+        ? "SATURATING"
+        : "FLAT";
+  // pctChange is null when the first month's count was 0 (undividable) — then the summary just
+  // carries the trade and the window, never a fabricated percentage. The window is stated as the
+  // real start year ("since '22"), NOT a hardcoded "3Y": the series spans more than three years and
+  // labelling it 3Y was a false claim (constitution II).
+  const pct = trend.pctChange;
+  const summary = [
+    trend.category.replace(/_/g, " ").toUpperCase(),
+    pct != null ? `${pct >= 0 ? "+" : ""}${pct}%` : null,
+    `since '${String(trend.fromYear).slice(-2)}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            padding: "2px 7px",
+            borderRadius: 20,
+            fontFamily: MONO,
+            fontSize: 9.5,
+            letterSpacing: ".06em",
+            fontWeight: 600,
+            background: rising ? "rgba(111,240,224,.14)" : "rgba(255,255,255,.07)",
+            color: rising ? "#9defdf" : "#98a2ab",
+          }}
+        >
+          {badge}
+        </span>
+        <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: ".04em", color: "#8a949d" }}>
+          {summary}
+        </span>
+      </div>
+
+      {trend.enoughHistory && trend.monthly.length > 1 ? (
+        <Sparkline points={trend.monthly.map((m) => m.count)} rising={rising} />
+      ) : (
+        // absent != 0: too little history draws nothing, never a flat line pretending to be a trend.
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim, marginTop: 6 }}>
+          not enough history
+        </div>
+      )}
+
+      <div style={{ fontFamily: MONO, fontSize: 9, letterSpacing: ".06em", color: C.faint, marginTop: 4 }}>
+        OSM edit history · ohsome
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A bare inline sparkline. The series is plotted min→max over its own range, so a flat curve reads
+ * flat and a climbing one climbs — the shape is the claim. Stretches to the rail width via a
+ * viewBox; `non-scaling-stroke` keeps the line crisp under that stretch.
+ */
+function Sparkline({ points, rising }: { points: number[]; rising: boolean }) {
+  const W = 300;
+  const H = 34;
+  const pad = 3;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = max - min || 1;
+  const n = points.length;
+  const coords = points.map((v, i) => {
+    const x = pad + (i / (n - 1)) * (W - 2 * pad);
+    const y = pad + (1 - (v - min) / range) * (H - 2 * pad);
+    return [x, y] as const;
+  });
+  const line = coords.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const stroke = rising ? C.accent : "#8a949d";
+  const [lx, ly] = coords[coords.length - 1];
+  return (
+    <svg
+      width="100%"
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      style={{ display: "block", marginTop: 6, overflow: "visible" }}
+    >
+      <polyline
+        points={line}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+      />
+      {/* The latest month, marked. It is where the badge's direction is read from. */}
+      <circle cx={lx} cy={ly} r={2.4} fill={stroke} vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 }
 
