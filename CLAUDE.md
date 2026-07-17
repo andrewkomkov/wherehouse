@@ -168,6 +168,14 @@ Read these before writing any geo SQL. Each cost real time today.
    Cloud trails open-source ~2 releases — **do not plan on 26.6 arriving before the
    deadline.** Build GeoJSON by hand (`toJSONString` + `map()`).
 
+   But note the flip side, found 19 Jul: Overture's `geometry` column **already arrives as a
+   native `Geometry` type** (a Variant) from `s3(...)` parquet. So `readWKB(geometry)` is
+   *wrong* and fails with `ILLEGAL_TYPE_OF_ARGUMENT`. Use
+   `variantElement(geometry, 'Polygon')` / `'MultiPolygon'` — check `variantType(geometry)`
+   first. `pointInPolygon((lon, lat), poly)` then works and is sub-second behind a `bbox`
+   prefilter. (`theme=divisions/type=division_area`: `subtype='macrohood'` = Ortsteil,
+   `'locality'` = Bezirk.)
+
 7. **`http_response_headers` quoting uses doubled single quotes**, not `"` —
    `'{''Content-Type'':''text/html''}'`. `"` fails with `CANNOT_PARSE_QUOTED_STRING`.
 
@@ -272,3 +280,9 @@ had to be enabled via the API — without it release-please fails with
   user in Russian.
 - When a claim matters, **verify it against the live service** rather than trusting docs
   — three of the traps above were doc-invisible.
+- **That includes prose you write yourself** (constitution II, amended 1.1.0). A sentence in
+  a spec is a claim. Day 3: the agent was banned from naming districts it invented — and the
+  spec doing the banning asserted three district names that were *also* invented, eyeballed
+  from coordinates, all three wrong. Verified numbers next to a sentence do not verify the
+  sentence. If nothing you can run would prove a statement false, you have decorated it, not
+  checked it.
