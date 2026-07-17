@@ -157,7 +157,7 @@ contract only. The CI gitleaks gate is untouched.
 
 **A maximal score can mean "a park".** Day 3 does not model land use, so a cell may score 100
 because nobody lives *near* it who is served — or because it is a cemetery with houses at its
-edge. The top-3 measured (Mariendorf, Hellersdorf/Kaulsdorf, Köpenick) are plausible
+edge. The top-3 measured (Lichtenrade, Biesdorf, Mahlsdorf) are plausible
 residential areas, so this is **not** currently firing. Mitigation if it does: filter
 candidate cells by a minimum population floor — a `WHERE`, not a score change. Not built
 until observed.

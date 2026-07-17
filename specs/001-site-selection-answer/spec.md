@@ -264,9 +264,16 @@ the layers are computed for that city and category.
 - **SC-005**: Re-asking the same question returns the same top-3 in the same order.
 - **SC-006**: The prose in the answer never exceeds two sentences (constitution I).
 - **SC-007**: The top-ranked cells are recognisable to someone who knows Berlin as dense
-  residential areas underserved by bakeries. *(Baseline from the measured run: Mariendorf,
-  Hellersdorf, Staaken, Köpenick — consistent with the day-2 exploration, and notably not the
-  commercial centre a POI-density proxy would have chosen.)*
+  residential areas underserved by bakeries. *(Baseline, **resolved against Overture divisions
+  on 19 July rather than guessed from coordinates**: Lichtenrade, Biesdorf, Mahlsdorf — outer
+  residential Ortsteile, and notably not the commercial centre a POI-density proxy would have
+  chosen.)*
+
+  ⚠️ **This criterion has already been failed by its own author.** The first version of this
+  baseline said "Mariendorf, Hellersdorf, Köpenick" — three names inferred by eyeballing
+  coordinates, and **all three wrong**: the pick centres fall outside those districts' bounding
+  boxes. The agent made the identical mistake in prose ("Spandau") and was corrected for it.
+  A district name is a claim like any other and must be executed, not estimated (constitution II).
 - **SC-008**: Kontur attribution is visible on every view that shows the map.
 
 ## Assumptions

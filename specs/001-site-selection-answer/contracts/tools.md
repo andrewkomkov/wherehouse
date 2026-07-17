@@ -65,8 +65,8 @@ carries them; the model's two sentences are the garnish.
 
 **Ordering**: `gap DESC, pop DESC, cell ASC` — total, verified stable across three runs (FR-004).
 
-**Measured (Berlin bakeries)**: 3 rows · ~700 ms · < 1 KiB ⇒ inline. Top-3: Mariendorf (6,826
-people, 0 bakeries in ring), Hellersdorf/Kaulsdorf (6,807, 0), Köpenick (5,860, 0).
+**Measured (Berlin bakeries)**: 3 rows · ~700 ms · < 1 KiB ⇒ inline. Top-3: Lichtenrade (6,826 people, 0 bakeries in
+ring), Biesdorf (6,807, 0), Mahlsdorf (5,860, 0).
 
 ---
 

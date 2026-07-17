@@ -74,9 +74,9 @@ baseline from 19 July, Berlin bakeries:
 
 | Rank | Area | People | Bakeries in ring | gap |
 |---|---|---|---|---|
-| 1 | Mariendorf (`881f18b021fffff`) | 6,826 | 0 | 100.0 |
-| 2 | Hellersdorf/Kaulsdorf (`881f1d4d81fffff`) | 6,807 | 0 | 100.0 |
-| 3 | Köpenick (`881f18b645fffff`) | 5,860 | 0 | 100.0 |
+| 1 | Lichtenrade (`881f18b021fffff`) | 6,826 | 0 | 100.0 |
+| 2 | Biesdorf (`881f1d4d81fffff`) | 6,807 | 0 | 100.0 |
+| 3 | Mahlsdorf (`881f18b645fffff`) | 5,860 | 0 | 100.0 |
 
 Dense residential, no bakeries nearby — and notably **not** the commercial centre, which is
 where a POI-density demand proxy would have pointed. If the top-3 lands on Mitte, the demand

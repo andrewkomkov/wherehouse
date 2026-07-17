@@ -122,8 +122,7 @@ other. That is a real conflict, not caution.
 - [X] T013 [US1] Run the exit gate in [quickstart.md](./quickstart.md): three layers, arriving
       progressively, no `ChatChunkTooLargeError`, ≤2 sentences, attribution visible, map
       survives a reload. **Hand-verify the top-3 against the reference SQL** — if the pins
-      disagree with that query, the agent is wrong. Expected: Mariendorf, Hellersdorf,
-      Köpenick. **If it lands on Mitte, the demand term has regressed to a POI proxy** and the
+      disagree with that query, the agent is wrong. Expected: Lichtenrade, Biesdorf, Mahlsdorf. **If it lands on Mitte, the demand term has regressed to a POI proxy** and the
       answer is no longer defensible — stop and fix before continuing.
 
 **Checkpoint**: the product exists. Day 3's exit gate is met and the submission stands on
