@@ -125,6 +125,10 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
 - Optional 30-min insurance: a hosted isochrone API (Geoapify — 3k credits/day, no credit
   card; or OpenRouteService — 2.5k/day) behind a "live point" path, for clicks outside our
   three cities.
+- **If time allows (~½ day):** ship the backfill as a **CF Container (Valhalla + baked
+  tiles) driven by a monthly Trigger.dev cron** instead of a laptop script. Answers the
+  *"would this work in production?"* half of Technical Implementation (20%). Only after the
+  skeleton — see decision note.
 - **Progressive choreography** — the wave sequence from ADR-001, wired for real.
 - **Design integration** — whatever came back from the designer.
 - **OLTP surfacing**: "your saved sites vs the market" as a real chat answer (bonus prize).
@@ -166,7 +170,7 @@ If we are writing code on day 7, something went wrong on day 2.
 | Cut | Why |
 |---|---|
 | MVT vector tiles from SQL | needs 26.6; Cloud is on 26.4 and trails ~2 releases. GeoJSON is fine at our scale. |
-| Runtime Valhalla (Cloudflare Containers / Fly.io) | **researched properly — see decision note below.** Not a trap, ~1 day of work, but a bad trade: it's a quarter of the budget spent on plumbing that makes our ClickHouse story *worse*. And H3 snapping dissolves the reason to want it. |
+| **Runtime** Valhalla answering live clicks | 63 ms × 25k cells ⇒ the whole answer space precomputes in 26 min. There is nothing left to compute at runtime; H3 res-9 snapping keeps "click anywhere". **Note: the *batch* on CF Containers is back in scope — see the decision note.** |
 | Auth / multi-user | zero rubric points |
 | Payload CMS-style layer catalogue | the sibling project's pattern is good and irrelevant here |
 | Whole-Europe scale | three cities is enough to prove it; ingest risk isn't worth 10% |
@@ -213,26 +217,54 @@ arches. POST/JSON passes through the Worker verbatim; no response size cap. Cost
    There is nothing left for a runtime service to do. A container would exist purely to
    recompute, on demand and slowly, an answer we already have.
 
-### Refresh cadence — don't overbuild this
+### REVISED 17 July — Valhalla-on-CF is back, but for the *batch*, not the runtime
 
-Roads do not change daily; **isochrones do not need a nightly job.** A one-off backfill now,
-then monthly (or incremental, for new cells only) is honest. Rebuilding 25k isochrones every
-night to produce a zero delta is theatre.
+The decision above stands for **runtime** routing. It does **not** apply to the batch, and
+the distinction matters: every objection that killed runtime Valhalla — cold start,
+ephemeral disk, mmap latency — **is irrelevant to a job that runs for 26 minutes once a
+month.** A batch does not care that it took 40 s to start.
 
-What *does* change daily is **POIs** — competitors open and close. That's the recurring job
-worth having, and it needs no Valhalla at all: refresh from Overture → rescore → alert
-("a bakery opened 200 m from your site #3, score −12", ADR-004). That is Trigger.dev's
-second meaningful role, and it's genuinely daily.
+**The argument that changed the call:** *Technical Implementation is 20% of the score and
+asks "would this work in production?"* — and "Andrew runs a script on his laptop monthly"
+is not production. An autonomous refresh pipeline is a real answer to a real criterion.
+That was underweighted first time round.
 
-Note the tension to avoid: *"Trigger.dev triggers Valhalla"* sounds good but requires
-Valhalla to be reachable — i.e. hosted — which is the thing we just cut. Either run the
-backfill locally (chosen), or run Valhalla **inside** a Trigger.dev task pulling tiles from
-R2 (cold start is irrelevant to a batch job — but whether their runtime can host a C++
-binary + 151 MB tile store is **unverified**, and verifying it costs a day we don't have).
+**But be honest about what it buys.** Berlin's road network moves by metres per month; an
+isochrone recomputed in 30 days will be near-identical. The value here is **architectural
+autonomy, not data freshness.** Pitch it as *"the pipeline is self-sustaining"* — never as
+*"the data is always fresh"*. A sharp judge will check, and the second claim is false.
+Real freshness lives in **POIs**, which change constantly and need no Valhalla at all.
+
+**Shape:**
+```
+Trigger.dev (monthly cron) ─► CF Container (Valhalla + baked tiles, amd64)
+                                   │  POST /isochrone × ~25k cells
+                                   ▼
+                            h3PolygonToCells ─► ClickHouse
+
+Trigger.dev (nightly cron) ─► Overture POI refresh ─► rescore ─► alerts   [no Valhalla]
+```
+
+**Cost: ~half a day**, not the full day the runtime version needed — no cold-start tuning,
+no sleepAfter, no R2 FUSE. Build tiles natively on arm64, `COPY` the `.tar` into a
+`--platform linux/amd64` image (tiles are little-endian and portable, so it's a pure copy
+with no QEMU emulation). Push to `registry.cloudflare.com` (Cloudflare does **not** cache
+images from Docker Hub/ECR/GAR). `standard-1` (0.5 vCPU / 4 GiB / 8 GB disk) fits ~400 MB
+comfortably.
+
+**Hard precondition (constitution III):** this happens **only after the day-2 skeleton
+proves `chat.agent()`**. If `data-map` parts don't behave as documented, every Valhalla
+plan is irrelevant within the hour. Skeleton first, always.
+
+If day 4 is full when we get here, this is the thing that waits — the nightly POI job
+already gives Trigger.dev a meaningful batch role, and it's closer to the product.
 
 Result: no cold start, no image question, no ephemeral disk, no demo-day failure mode, and
 a better story. Runtime Valhalla is the right call for the version of this project that has
 three weeks — not four days.
+
+**This verdict applies to the *runtime* only.** See the revision immediately below: the
+same container, used for the *batch*, is a different question with a different answer.
 
 ## Risk register
 
