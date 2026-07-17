@@ -71,7 +71,9 @@ No styling. No basemap tuning. No scoring. One dot.
 - `places` table for Berlin/Amsterdam/Belgrade: `INSERT … SELECT … FROM s3(…)`,
   `ORDER BY mortonEncode(...)`, H3 in **MATERIALIZED** columns (constitution II — this is
   where the lat/lon trap lives)
-- Berlin PMTiles extract → R2 (31MB, ~6s) + the Protomaps Worker on a custom domain
+- ~~Berlin PMTiles extract → R2 + the Protomaps Worker on a custom domain~~ **DONE** —
+  live at `https://tiles.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt`, 30.8 MB cut in 20.3 s,
+  rebuildable with `./infra/basemap.sh`
 
 **Exit gate:** a dot appears on a map, driven by a ClickHouse query, streamed through
 `chat.agent()`, and it *moves* when rewritten with the same id.

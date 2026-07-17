@@ -226,31 +226,49 @@ unratified hypotheses), Russian data sources, hardcoded host paths.
 
 ## 6. Basemap — Protomaps PMTiles on R2
 
-Measured with `pmtiles extract --dry-run` against the live planet (136.8 GB):
+**BUILT AND VERIFIED** (17 Jul) — live at `https://tiles.slim-shaggy.com`, provisioned by
+`./infra/basemap.sh`. Executed numbers, from the real cut of build `20260717`:
 
-| extract | zooms | size | time |
-|---|---|---|---|
-| Berlin metro | z0–14 | **31 MB** | 5.8 s |
-| Berlin metro | z0–15 | 80 MB | — |
-| Germany | z0–14 | 3.4 GB | — |
+| extract | zooms | size | time | note |
+|---|---|---|---|---|
+| Berlin metro | z0–14 | **30,812,918 B (30.8 MB)** | **20.3 s** | executed |
+| Berlin metro | z0–15 | 80 MB | — | dry-run estimate, unverified |
+| Germany | z0–14 | 3.4 GB | — | dry-run estimate, unverified |
 
-Three cities at z0–14 ≈ **<100 MB total**. R2 egress is free; a ranged GET = 1 Class B
-op ($0.36/M).
+The size estimate held (31 MB → 30.8 MB actual). **The 5.8 s did not: the real cut takes
+20.3 s.** `--dry-run` resolves the tile ranges without downloading the bytes, so it times
+the planning, not the work. 1175 tiles, 48 requests, 32 MB transferred (overfetch 0.05)
+over 8 threads. Still trivial — but budget ~20 s per city, not ~6.
 
-```bash
-pmtiles extract https://build.protomaps.com/20260716.pmtiles berlin.pmtiles \
-  --bbox=13.088,52.338,13.761,52.675 --maxzoom=14 --download-threads=8
-```
+Three cities at z0–14 ≈ **<100 MB total** (extrapolated from Berlin's actual 30.8 MB).
+R2 egress is free; a ranged GET = 1 Class B op ($0.36/M).
+
 **Don't hardcode a build date** — `build.protomaps.com/YYYYMMDD.pmtiles` dailies expire
-after ~a week.
+after ~a week, and there is **no listing endpoint** (the bucket root returns a 404 page).
+`resolve_build()` in `infra/basemap.sh` probes backwards from today with a ranged GET
+until one returns 206.
+
+Note the archive's `planetiler:buildtime` is `2026-03-28` even in the `20260717` daily —
+the build date is not the OSM data date.
 
 **Serve via the Protomaps Worker on a custom domain — not `r2.dev`, not bare R2:**
 - `r2.dev` is rate-limited and **uncached** (docs: "development purposes" only)
 - Cache API is **inert on `*.workers.dev`** — custom domain required or every tile
-  re-reads R2
+  re-reads R2. **Confirmed working on the custom domain**: a repeat tile GET returns
+  `cf-cache-status: HIT`.
 - Bare R2 + CDN gzip **corrupts range requests** (malformed 206, zero-byte body) — this
   broke MapLibre's own demo site ([demotiles#35](https://github.com/maplibre/demotiles/issues/35))
-- `.pmtiles` is **not** in Cloudflare's default-cached extension list ⇒ explicit Cache Rule needed
+- `.pmtiles` is **not** in Cloudflare's default-cached extension list. Not an issue for us:
+  the worker caches the **tile** responses it synthesises, and the `.pmtiles` archive is
+  never fetched over HTTP — it's read through the R2 binding.
+
+**The first request after creating the custom domain 500s with Cloudflare `error code:
+1104`** while the route propagates; it clears within ~a minute. A single 500 straight after
+`wrangler deploy` is not a broken deploy — re-request before debugging.
+
+**`wrangler whoami` under-reports scopes.** The OAuth token lists no R2 scope at all, yet
+every R2 call (`bucket create`, `object put`, the binding) succeeds. Another state field
+that lies — probe the capability, don't read the scope list.
 
 Versions: `pmtiles@4.4.1` · `@protomaps/basemaps@5.7.2` · `maplibre-gl@5.24.0`.
 v5 unified the style API: `layers(source, namedFlavor("dark"), { lang: "en" })`.
