@@ -84,6 +84,32 @@ For production the `ON 1=1` + `WHERE geoDistance` cross join must become an H3 k
 join (`WHERE p.h3_8 IN h3kRing(s.h3_8, 1)`) against a local `places` table — see
 [ADR-002](data-sources.md). The form above is the demo-scale proof.
 
+## ⚠️ Operational lesson, learned the hard way on day 1
+
+Hours after building this, ClickHouse emailed: *"ClickPipe wherehouse-pg-cdc is currently
+degraded … due to missing replication slot."*
+
+**Cause:** we tried to downsize the Postgres via `PATCH /postgres/{id}` `{"size": …}`.
+That call returns `200`, echoes back the **old** size, and never resizes — but it **does
+restart the instance**. The restart dropped the replication slot, because the pipe setting
+`enableFailoverSlots` defaults to `false`. Calling it a "silent no-op" was wrong: it's
+worse than a no-op, it silently breaks CDC.
+
+**The pipe's own `state` field said `Running` throughout.** It lies. The email alert was
+the only honest signal. Diagnose with Postgres, not the pipe:
+
+```sql
+SELECT * FROM pg_replication_slots;        -- empty = broken
+SELECT pg_postmaster_start_time();         -- recent = it restarted
+```
+
+**Fix** — `PATCH /clickpipes/{id}/state {"command":"resync"}`. Recreates the slot
+(`peerflow_slot_mirror_<id>`, plugin `pgoutput`) and re-snapshots; ~30 s at our volume.
+Then verify with a canary INSERT — do not trust the state field.
+
+**Rules:** never touch Postgres `size` (resize = delete + recreate). Any Postgres restart
+means checking the slot. Consider `enableFailoverSlots: true` if we ever restart on purpose.
+
 ## Product surface this unlocks
 
 - **Portfolio**: saved sites are editable first-class objects, not query output.
