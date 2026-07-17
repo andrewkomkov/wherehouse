@@ -50,6 +50,7 @@ in 4 seconds, cold. See [ADR-002](docs/architecture/data-sources.md).
 
 | | |
 |---|---|
+| [`docs/PLAN.md`](docs/PLAN.md) | **The plan** — day by day to the deadline, what's cut, risk register |
 | [`docs/design/BRIEF.md`](docs/design/BRIEF.md) | **Designer brief** — product, stack, animation spec, colour direction |
 | [`.specify/memory/constitution.md`](.specify/memory/constitution.md) | Project constitution — outranks everything else |
 | [`docs/research/findings.md`](docs/research/findings.md) | The research digest — brief decoded, verified capabilities, traps, open questions |

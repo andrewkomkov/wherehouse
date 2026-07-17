@@ -14,6 +14,18 @@ The repo is currently **research + scaffolding**. No application code yet — re
 `docs/research/findings.md` first, it is the distilled output of five research agents
 plus live verification against our own ClickHouse service.
 
+## Where we are
+
+[`docs/PLAN.md`](docs/PLAN.md) is the day-by-day plan to the deadline, what's explicitly
+cut, and the risk register. **Read it before deciding what to work on.**
+
+Effective code time ends **21 July evening** (deadline 23 July 12:00 UTC, minus video and
+the flip to public). That's four working days, not six.
+
+The next thing that matters is the **day-2 walking skeleton**: `chat.agent()` → one SQL →
+one `data-map` part → one dot on a map → confirm rewriting the same `id` updates it
+**in place**. ADR-001 is unverified until that passes.
+
 ## Spec-Driven Development — MANDATORY
 
 This project uses [spec-kit](https://github.com/github/spec-kit) (v0.12.18). **Non-trivial
