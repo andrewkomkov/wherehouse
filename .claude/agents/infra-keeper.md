@@ -48,9 +48,20 @@ guessing field names; it is the ground truth and it has surprised us before.
   `sslmode=verify-full&sslrootcert=…`. Same PEM goes into the ClickPipe `caCertificate`.
 - **Postgres password is returned once**, on create. If lost, reset via
   `PATCH /postgres/{id}/password`.
-- **`PATCH /postgres/{id}` with `size` is a silent no-op.** It returns `200` echoing the
-  *old* size and never applies. Verified with both `r8gd.medium` and `r6gd.medium`.
-  Resizing requires delete + recreate. Don't chase it.
+- **`PATCH /postgres/{id}` with `size` does NOT resize — but it DOES restart the
+  instance.** It returns `200` echoing the *old* size and never applies the change
+  (verified with `r8gd.medium` and `r6gd.medium`). Worse than a no-op: the restart
+  **drops the replication slot** and silently degrades CDC. We did this to ourselves on
+  day 1. Do not touch `size`. Resizing means delete + recreate.
+- **A Postgres restart kills the CDC slot** while the pipe still reports `Running` —
+  the pipe's own state field lies; ClickHouse's email alert is the honest signal.
+  Diagnose with `SELECT * FROM pg_replication_slots` (empty = broken) and
+  `SELECT pg_postmaster_start_time()` (recent = it restarted).
+  **Fix:** `PATCH /clickpipes/{id}/state {"command":"resync"}` — recreates the slot
+  (`peerflow_slot_mirror_<id>`, plugin `pgoutput`) and re-snapshots. Takes ~30 s on our
+  data volume. Then verify with a canary INSERT, don't trust the state field.
+  Hardening: the pipe setting `enableFailoverSlots` is `false` by default — that's why
+  the slot didn't survive.
 - **Sizing note:** `c6gd.large` is 2 vCPU / 4 GB — the *smallest* in its family
   (AWS "large" is the low end, not a big box). The only `.medium` options are
   `r6gd.medium` / `r8gd.medium` at 1 vCPU / **8 GB** — memory-optimised, so likely
