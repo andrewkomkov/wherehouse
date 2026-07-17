@@ -50,7 +50,34 @@ PATCH that restarts without resizing). Both caught, both now in the constitution
 
 ---
 
-## Day 2 — 18 July · **WALKING SKELETON** ← the critical day
+## Day 2 — 18 July · **WALKING SKELETON** ✅ gate passed
+
+**Answer: yes — `chat.agent()` behaves as documented, on the one claim that mattered.**
+
+Recorded live in the browser, two writes under `id="map"` 1.5 s apart:
+
+```
+t=27977  parts=1 | showing=site 1/2: Kastanienallee corner
+t=29577  parts=1 | showing=site 2/2: Boxhagener Platz
+```
+
+Part count held at **1** while the content changed — merge on `type`+`id`, last write wins.
+ADR-001's load-bearing assumption is now a verified fact, and the project's largest risk is
+retired on day 2 as intended.
+
+Also landed: 211,818 Overture POIs across the three cities (H3 verified by distance —
+worst case 556 m at res 8, 210 m at res 9); Berlin PMTiles live on
+`tiles.slim-shaggy.com` (30.8 MB, cut in 20.3 s; a real tile returns 200 / 198 KB / 100 ms).
+
+**What day 2 broke:** ADR-001 claimed the full payload goes to the UI. There is a **1 MiB
+per-record cap** on the chat stream and we already exceed it — Berlin food & drink is
+1.27 MiB, res-9 choropleth ~2.2 MiB. Narrow queries are safe; *"show me every restaurant"*
+is a hard `ChatChunkTooLargeError`. Fix is the ID-reference pattern with **ClickHouse as
+the store** (ADR-003 already proved it serves HTTP with CORS open) — day 3, before any wide
+layer ships.
+
+<details>
+<summary>Original day-2 plan, for the record</summary>
 
 One question this day answers: *does `chat.agent()` actually do what the docs say?*
 
@@ -80,11 +107,20 @@ No styling. No basemap tuning. No scoring. One dot.
 **If in-place update does not work → stop and redesign ADR-001 the same day.** That is why
 this is day 2 and not day 5.
 
+</details>
+
 ---
 
 ## Day 3 — 19 July · the real answer
 
 Now spec it — `/speckit-specify` the site-selection answer flow, with what day 2 taught us.
+
+**Day 2 hands day 3 two things it must fold in:**
+- **The 1 MiB cap is a design input, not a footnote.** Any layer wider than a single
+  category needs the ID-reference path (handle on the stream, GeoJSON fetched straight from
+  ClickHouse by the browser). Spec it that way from the start rather than retrofitting.
+- The skeleton's `showSavedSites` tool is throwaway — it exists to prove the wire, and its
+  deliberate double-write should not survive into the real tools.
 
 - Agent tools: `findCompetitors`, `scoreArea`, `rankSites` — each emits its own layer
 - The scoring query: H3 res 8, competitor density, GAP formula
@@ -272,8 +308,9 @@ same container, used for the *batch*, is a different question with a different a
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| `chat.agent()` doesn't behave as documented | **critical** — 25% + the whole theme | day 2 skeleton; fail fast, redesign same day |
-| Progressive in-place update doesn't work | **high** — ADR-001 is the innovation story | same gate; fallback = render layers on turn completion (weaker, still visual) |
+| ~~`chat.agent()` doesn't behave as documented~~ | ~~critical~~ → **RETIRED 18 Jul** | skeleton ran it end to end; behaves as documented |
+| ~~Progressive in-place update doesn't work~~ | ~~high~~ → **RETIRED 18 Jul** | proven live: `parts=1` across two writes to one id, content changed |
+| **1 MiB per-record cap kills a wide layer mid-demo** | **high** — new, found day 2 | already exceeded by Berlin food & drink (1.27 MiB). ID-reference via ClickHouse, day 3, before any wide layer ships |
 | Designer doesn't deliver in time | medium | brief is out day 1; ship functional-but-plain, style later |
 | Cloud reaches 26.6 (or doesn't) | low | assume it doesn't; nothing depends on it |
 | CDC slot breaks again | low | `resync` is a one-liner; never touch Postgres `size` |

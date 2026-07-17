@@ -38,9 +38,20 @@ cut, and the risk register. **Read it before deciding what to work on.**
 Effective code time ends **21 July evening** (deadline 23 July 12:00 UTC, minus video and
 the flip to public). That's four working days, not six.
 
-The next thing that matters is the **day-2 walking skeleton**: `chat.agent()` → one SQL →
-one `data-map` part → one dot on a map → confirm rewriting the same `id` updates it
-**in place**. ADR-001 is unverified until that passes.
+**Day 2 is done and its gate passed** — `chat.agent()` behaves as documented. Two writes to
+one `id` produced `parts=1` with the content changed: parts merge on `type`+`id`, last write
+wins. ADR-001 is proven, not assumed, and the project's biggest risk is retired. The
+skeleton lives in `web/` (`pnpm dev` + `pnpm exec trigger dev`).
+
+**Next: day 3 — the real answer flow** (`/speckit-specify`). Two things day 2 hands it:
+
+1. **The chat stream has a hard ~1 MiB per-record cap, and we already exceed it.** It
+   applies to `data-map` parts. Berlin food & drink is 1.27 MiB, res-9 choropleth ~2.2 MiB
+   ⇒ `ChatChunkTooLargeError` and a dead run. Narrow queries are fine; *"show me every
+   restaurant"* is not. Fix = stream a handle, let the browser fetch GeoJSON straight from
+   ClickHouse (ADR-003 proved it serves HTTP with CORS open). Design it in, don't retrofit.
+2. `showSavedSites` in `web/src/trigger/chat.ts` is scaffolding — it double-writes on
+   purpose to exercise the gate. Do not let that survive into real tools.
 
 ## Spec-Driven Development — MANDATORY
 
@@ -151,6 +162,14 @@ Read these before writing any geo SQL. Each cost real time today.
 
 7. **`http_response_headers` quoting uses doubled single quotes**, not `"` —
    `'{''Content-Type'':''text/html''}'`. `"` fails with `CANNOT_PARSE_QUOTED_STRING`.
+
+8. **The chat stream caps a single record at ~1 MiB**, `data-map` parts included, and it
+   cannot be raised. We already exceed it (Berlin food & drink = 1.27 MiB). See ADR-001.
+
+9. **Don't copy the Trigger.dev docs' `UIDataTypes & { … }` typing** — `UIDataTypes` is
+   `Record<string, unknown>`, so intersecting widens `keyof` to `string`, degrades the part
+   type to `` `data-${string}` `` with `data: unknown`, and silently kills every bit of
+   client-side narrowing. Declare the shape bare: `type Foo = { map: MapData }`.
 
 ## Architecture decisions (ADRs — read before changing direction)
 

@@ -1,7 +1,29 @@
 # ADR-001: The map IS the response (progressive fill)
 
-**Status:** locked in
-**Date:** 2026-07-17
+**Status:** ACCEPTED — core mechanism **proven on the live API** 18 July (day-2 skeleton)
+**Date:** 2026-07-17 · **Verified:** 2026-07-18
+
+> **What is proven vs assumed** (constitution II)
+>
+> **Proven** — in-place reconciliation, the load-bearing claim below. The skeleton's tool
+> writes `id="map"` once per row, 1.5 s apart, with two real `oltp.pg_saved_sites` rows
+> ~4 km apart in Berlin. Recorded in the browser:
+>
+> ```
+> t=27977  parts=1 | showing=site 1/2: Kastanienallee corner
+> t=29577  parts=1 | showing=site 2/2: Boxhagener Platz
+> ```
+>
+> The part count holds at **1** while the content changes: parts merge on `type`+`id`,
+> last write wins. The dot moved; it did not duplicate. Also proven: `{ rowCount }` reaches
+> the model while the GeoJSON reaches only the UI, and typed `data-map` parts arrive in
+> `message.parts`.
+>
+> **Assumed still** — the seven-wave choreography below (only one wave has ever run), and
+> that the map survives a refresh (persistence is not yet exercised).
+>
+> **Refuted** — "the full payload goes to the UI" without qualification. See the 1 MiB cap
+> section; it is the one thing in this ADR that day 2 broke.
 
 ## Context
 
@@ -68,6 +90,58 @@ Streaming 40k GeoJSON points through the LLM context would be slow, expensive, a
 pointless — the model never needs to *read* the geometry, only know it landed.
 Trigger.dev documents this as the `large-payloads` pattern. `toModelOutput` can also
 shape a cheap model-facing view separately from the UI payload.
+
+## Hard limit: ~1 MiB per stream record — and we already exceed it
+
+Found while building the day-2 skeleton; this ADR previously assumed the UI payload was
+unbounded. **It is not.** The realtime stream behind `chat.agent` enforces a per-record cap
+of **1 MiB** (`1048576` bytes minus envelope). It applies to *everything* on the chat
+stream, including `chat.response.write` — so it applies to `data-map`. Crossing it fails
+the run with `ChatChunkTooLargeError`. It is platform-level and **cannot be raised**.
+
+Measured against the real `geo.places` data (18 July), not estimated:
+
+| Layer | Points | GeoJSON | Verdict |
+|---|---|---|---|
+| Berlin bakeries | 1,460 | 153 KiB | fits |
+| Berlin food & drink | 12,746 | **1.27 MiB** | **fails** |
+| Every Berlin POI | 139,807 | **14.9 MiB** | **fails** |
+| H3 res-8 choropleth | 2,015 cells | ~500 KiB | fits, no margin |
+| H3 res-9 choropleth | 9,035 cells | ~2.2 MiB | **fails** |
+
+So the narrow demo query is safe and the *obvious* next question — *"show me every
+restaurant"* — is a hard crash. This must be solved before any wide layer ships, and it
+cannot be discovered on day 6.
+
+**Fix — the ID-reference pattern, where our store is ClickHouse itself.** The docs say:
+persist the payload, stream only a handle. We need no new store, because **ADR-003 already
+proved ClickHouse Cloud serves HTTP directly and CORS is open** — the browser can query it
+with the read-only `site` user:
+
+```ts
+// tool: stream a handle, not the geometry
+chat.response.write({
+  type: "data-map",
+  id: "competitors",
+  data: { queryId, rowCount: rows.length, bbox },  // bytes, not megabytes
+});
+return { rowCount: rows.length };
+// browser: fetch the GeoJSON straight from ClickHouse using queryId
+```
+
+This turns the constraint into an asset: on stage the **browser talks to ClickHouse
+directly**, which strengthens the 25% "use of ClickHouse" criterion rather than working
+around it. Deferred to day 3 — the skeleton's payloads are kilobytes and the gate did not
+need it.
+
+## Typing trap: do not intersect with `UIDataTypes`
+
+The Trigger.dev docs show `type MyDataTypes = UIDataTypes & { "turn-status": {...} }`.
+**Copying that costs you all client-side narrowing.** `UIDataTypes` is
+`Record<string, unknown>`, so intersecting widens `keyof` to `string`; `DataUIPart` then
+degrades from `data-map` to `` `data-${string}` `` with `data: unknown`, and
+`Extract<Msg["parts"][number], { type: "data-map" }>` resolves to `never`. Declare the map
+bare instead — `type WhereHouseDataTypes = { map: MapData }`.
 
 ## Consequences
 
