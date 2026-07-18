@@ -110,6 +110,45 @@ const WAVES = [
 type WaveState = "pending" | "active" | "done";
 
 /**
+ * The composer's suggestion chips. Each is a real message the agent can answer — "compare vs the
+ * market" drives compareSavedSites, "why the #1 pick?" asks the agent to defend its own ranking,
+ * "show pharmacies instead" re-runs the whole flow for another trade. They send verbatim; nothing
+ * here is a canned client-side answer.
+ */
+const SUGGESTIONS = ["compare vs the market", "why the #1 pick?", "show pharmacies instead"] as const;
+
+/**
+ * A grouped agent run for the left rail. `kind` is honest and structural: `rebuild` produced the
+ * picks layer (a fresh answer), `steer` produced some other layer but no picks (a nudge to the
+ * existing map), `talk` produced no map at all (a pure conversational turn).
+ */
+type RunKind = "rebuild" | "steer" | "talk";
+type RunStep = { key: string; label: string; engine: string; state: WaveState };
+type Run = {
+  id: string;
+  q: string;
+  kind: RunKind;
+  steps: RunStep[];
+  chip: string;
+  live: boolean;
+  hasLayers: boolean;
+};
+
+/** Palette for a run's kind — chrome only, never the pick yellow (which is spent once, on #1). */
+const RUN_KIND: Record<RunKind, { label: string; dot: string; bg: string; color: string }> = {
+  rebuild: { label: "rebuild", dot: C.accent, bg: "rgba(111,240,224,.14)", color: "#9defdf" },
+  steer: { label: "steer", dot: "#8a9bc0", bg: "rgba(138,155,192,.14)", color: "#aeb9d0" },
+  talk: { label: "talk", dot: "#69737d", bg: "rgba(255,255,255,.06)", color: "#98a2ab" },
+};
+
+/** Per-engine tag styling for a run step (agent / ClickHouse / Valhalla). Chrome greys only. */
+const ENGINE_TAG: Record<string, { bg: string; col: string }> = {
+  agent: { bg: "rgba(255,255,255,.06)", col: "#98a2ab" },
+  ClickHouse: { bg: "rgba(111,240,224,.1)", col: "#9defdf" },
+  Valhalla: { bg: "rgba(179,168,255,.12)", col: "#c2b8ff" },
+};
+
+/**
  * Resolve a layer handle by reading the GeoJSON **straight out of ClickHouse**.
  *
  * No API route, no proxy: ADR-003 proved Cloud serves HTTP with CORS open, and `site` is
@@ -342,7 +381,7 @@ export function Chat() {
   // `id` is the chatId the transport keys sessions on (its accessToken/startSession callbacks
   // receive the same value). Saving a pick from the client threads it through so the save lands
   // under the same shortlist scope as the conversation.
-  const { messages, sendMessage, status, id: chatId } = useChat<Msg>({ transport });
+  const { messages, sendMessage, setMessages, status, id: chatId } = useChat<Msg>({ transport });
   const [input, setInput] = useState("where should I open a bakery in Berlin?");
   const [error, setError] = useState<string | null>(null);
   const [weights, setWeights] = useState<Weights>({ ...NEUTRAL });
@@ -357,6 +396,20 @@ export function Chat() {
   });
   const [selected, setSelected] = useState<number | null>(null);
   const [replaying, setReplaying] = useState(false);
+  /**
+   * Which past agent run the map is currently showing. `null` = the live/current data — the
+   * incremental paint effect owns the map. A non-null value points the map at a finished run's
+   * snapshot (see `runSnapshots`), driven by the top-bar scrub control and the run cards.
+   */
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  /** Run ids whose step list is expanded in the left rail. The live run is always shown expanded. */
+  const [openRuns, setOpenRuns] = useState<Set<string>>(new Set());
+  /**
+   * Honest "session resumed" detection: true only when assistant messages were present before the
+   * user sent anything this session (i.e. the transport restored a prior conversation). If nothing
+   * is ever restored this stays false and the pill is simply never shown — never faked.
+   */
+  const [resumed, setResumed] = useState(false);
   /**
    * The user's saved history (feature 003). Postgres is authoritative, so this is loaded straight
    * from `listSavedSitesAction` on mount and after every save — it survives a reload because the
@@ -386,6 +439,18 @@ export function Chat() {
   const painted = useRef(new Map<LayerId, string>());
   /** Bumped to cancel in-flight tweens when a new answer or a replay starts. */
   const gen = useRef(0);
+  /**
+   * Per-run snapshot of the resolved layers, taken when a run finishes. Lets the scrub control
+   * replay a PAST run onto the map without touching the live `store` and without re-running the
+   * agent — same money-saving discipline as `replay` (a judge will scrub back and forth).
+   */
+  const runSnapshots = useRef<Map<string, Partial<Record<LayerId, GeoJSON.FeatureCollection>>>>(
+    new Map(),
+  );
+  /** True once the user has sent anything this session — gates the honest "session resumed" pill. */
+  const sentThisSession = useRef(false);
+  /** Previous `busy`, to catch the true→false edge where a run finishes and gets snapshotted. */
+  const prevBusy = useRef(false);
 
   // Latest write wins per layer id — ADR-001 merges parts on type+id, so a layer that is
   // rewritten as it fills arrives here as one part with new content.
@@ -713,7 +778,10 @@ export function Chat() {
             // Wave 1 in the comp is "fly to the city". Ours flies when the competitor bbox
             // lands, because that is when we first know where the city is — the agent resolved
             // it, we did not hardcode it.
-            m.fitBounds([w, s, e, n], { padding: { top: 60, right: 60, bottom: 60, left: 380 }, duration: 900, maxZoom: 13 });
+            // The map now lives inside the centre column, so the padding is modest and symmetric
+            // (was left:380 to clear the old floating rail). A little extra at the bottom keeps the
+            // caption overlay from covering the fitted bounds.
+            m.fitBounds([w, s, e, n], { padding: { top: 60, right: 60, bottom: 96, left: 60 }, duration: 900, maxZoom: 13 });
           }
           if (data.layer === "opportunity") recolour(m);
           await paint(m, data.layer, fc, gen.current);
@@ -760,34 +828,45 @@ export function Chat() {
    * a judge will press this button more than once. Nothing here talks to Trigger.dev or the
    * model — the GeoJSON is in `store`, and what replays is the client-side choreography.
    */
-  const replay = useCallback(async () => {
-    const m = map.current;
-    if (!m || replaying) return;
-    const myGen = ++gen.current;
-    setReplaying(true);
-    setSelected(null);
+  const replayFrom = useCallback(
+    async (snapshot: Partial<Record<LayerId, GeoJSON.FeatureCollection>>) => {
+      const m = map.current;
+      if (!m || replaying) return;
+      const myGen = ++gen.current;
+      setReplaying(true);
+      setSelected(null);
 
-    m.setPaintProperty("opportunity", "fill-opacity", 0);
-    m.setPaintProperty("opportunity-line", "line-opacity", 0);
-    m.setPaintProperty("competitors", "circle-opacity", 0);
-    m.setPaintProperty("competitors", "circle-radius", 0);
-    if (m.getLayer("catchment")) {
-      m.setPaintProperty("catchment", "fill-opacity", 0);
-      m.setPaintProperty("catchment-line", "line-opacity", 0);
-      m.setPaintProperty("catchment-line", "line-width", 0);
-    }
-    await sleep(120);
+      m.setPaintProperty("opportunity", "fill-opacity", 0);
+      m.setPaintProperty("opportunity-line", "line-opacity", 0);
+      m.setPaintProperty("competitors", "circle-opacity", 0);
+      m.setPaintProperty("competitors", "circle-radius", 0);
+      if (m.getLayer("catchment")) {
+        m.setPaintProperty("catchment", "fill-opacity", 0);
+        m.setPaintProperty("catchment-line", "line-opacity", 0);
+        m.setPaintProperty("catchment-line", "line-width", 0);
+      }
+      if (m.getLayer("saved")) m.setPaintProperty("saved", "circle-stroke-opacity", 0);
+      // The layers absent from this snapshot must not linger from whatever was last on the map:
+      // clear every source, then the reveal below re-adds only the ones this run actually produced.
+      for (const id of LAYER_IDS)
+        if (!snapshot[id]) (m.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(EMPTY);
+      await sleep(120);
 
-    for (const w of WAVES) {
-      if (gen.current !== myGen) break;
-      if (!("layer" in w)) continue;
-      const fc = store.current[w.layer as LayerId];
-      if (!fc) continue;
-      await paint(m, w.layer as LayerId, fc, myGen);
-      await sleep(150);
-    }
-    if (gen.current === myGen) setReplaying(false);
-  }, [map, paint, replaying]);
+      for (const w of WAVES) {
+        if (gen.current !== myGen) break;
+        if (!("layer" in w)) continue;
+        const fc = snapshot[w.layer as LayerId];
+        if (!fc) continue;
+        await paint(m, w.layer as LayerId, fc, myGen);
+        await sleep(150);
+      }
+      if (gen.current === myGen) setReplaying(false);
+    },
+    [map, paint, replaying],
+  );
+
+  /** Replay the CURRENT answer's assembly. Thin wrapper over replayFrom so the two never diverge. */
+  const replay = useCallback(() => replayFrom(store.current), [replayFrom]);
 
   // ---- derived UI state -----------------------------------------------------------------
 
@@ -842,38 +921,198 @@ export function Chat() {
   const catchmentShown = latest.has("catchment") && visible.catchment;
   const notMeasured = latest.get("opportunity")?.notMeasured;
 
-  // ---- market at a glance (feature 006) --------------------------------------------------
-  // A compact stat strip that frames the map as a dashboard. Every tile is computed from data the
-  // client ALREADY holds — no extra tool or query — and each is absent until its layer lands, so
-  // the strip fills in as the assembly runs (absent != 0: a missing datum is never rendered as 0).
-  const glance: { key: string; label: string; value: React.ReactNode; unit?: string; accent?: boolean }[] = [];
+  // ---- KPI strip (feature 006, now the map's dashboard header) ---------------------------
+  // Every tile is computed from data the client ALREADY holds — no extra tool or query — and each
+  // is absent until its own layer lands (absent != 0: a missing datum is never rendered as 0; a
+  // tile that has no datum shows "awaiting …", not a fabricated number).
   const competitorCount = latest.get("competitors")?.rowCount;
-  if (competitorCount !== undefined)
-    glance.push({ key: "competitors", label: "Competitors", value: competitorCount.toLocaleString("en") });
   // The #1 pick's score out of 100 — computed under the CURRENT weights exactly as the Top-picks
   // table renders it (gapDisplay), so the two never show different numbers for the same pick when a
-  // slider moves. Rendered in text ink, not the accent: the palette reserves C.accent for chrome,
-  // never a data value (dataviz: values wear text tokens).
+  // slider moves.
   const pick1 = picks.find((f) => f.properties.rank === 1)?.properties;
   const topScore = pick1 ? (scale ? gapDisplay(pick1 as CellProps, scale, weights) : pick1.gap) : undefined;
-  if (topScore !== undefined)
-    glance.push({ key: "top", label: "Top score", value: Math.round(topScore), unit: "/ 100" });
-  if (medianOpportunity !== undefined)
-    glance.push({ key: "median", label: "Median opportunity", value: Math.round(medianOpportunity), unit: "/ 100" });
-  // Momentum rides its own trend part; the tile is absent when the trade had too little history —
-  // never a fake "flat" here (absent != 0; the sparkline below states the not-enough-history case).
-  if (trend)
-    glance.push({
-      key: "momentum",
-      label: "Momentum",
-      value: trend.direction,
-      unit: trend.pctChange != null ? `${trend.pctChange >= 0 ? "+" : ""}${trend.pctChange}%` : undefined,
+
+  // ---- agent runs (the left-rail centerpiece) -------------------------------------------
+  // The conversation, grouped into runs: each user turn opens a run; the assistant turns until the
+  // next user turn belong to it. `kind`, `steps` and `chip` are derived from REAL parts — tool
+  // state and `data-map` parts landing — never from a timer (constitution: the assembly is
+  // computed, not choreographed). Past runs show every step done; the live (last, streaming) run
+  // reads its step states from the same live signals the map does.
+  const runs = useMemo<Run[]>(() => {
+    type Raw = {
+      id: string;
+      q: string;
+      tools: Map<string, string>;
+      map: Map<LayerId, LayerData>;
+      text: boolean;
+    };
+    const raw: Raw[] = [];
+    let cur: Raw | null = null;
+    for (const msg of messages) {
+      if (msg.role === "user") {
+        const q = msg.parts
+          .filter((p): p is Extract<Msg["parts"][number], { type: "text" }> => p.type === "text")
+          .map((p) => p.text)
+          .join("");
+        cur = { id: msg.id, q, tools: new Map(), map: new Map(), text: false };
+        raw.push(cur);
+      } else if (msg.role === "assistant" && cur) {
+        for (const p of msg.parts as unknown as { type: string; state?: string; data?: LayerData }[]) {
+          if (p.type.startsWith("tool-")) cur.tools.set(p.type, p.state ?? "");
+          else if (p.type === "data-map" && p.data) cur.map.set(p.data.layer, p.data);
+          else if (p.type === "text") cur.text = true;
+        }
+      }
+    }
+    return raw.map((r, i) => {
+      const isLast = i === raw.length - 1;
+      const live = isLast && busy;
+      // Honest classification: a run that produced the picks layer rebuilt the answer; one that
+      // produced any other layer but no picks steered it; one that produced no map at all is talk.
+      const kind: RunKind = r.map.has("picks") ? "rebuild" : r.map.size > 0 ? "steer" : "talk";
+      const steps: RunStep[] = [];
+      for (const w of WAVES) {
+        let present: boolean;
+        if (w.key === "read") present = true;
+        else if (w.key === "caption") present = r.text || (isLast && caption.length > 0);
+        else present = "tool" in w && r.tools.has((w as { tool: string }).tool);
+        if (!present) continue;
+        // Live run: its true streamed state. Past runs: settled, every step done.
+        const state: WaveState = live ? waveState(w) : "done";
+        steps.push({ key: w.key, label: w.label, engine: w.source, state });
+      }
+      const comp = r.map.get("competitors")?.rowCount;
+      const chip =
+        comp !== undefined
+          ? `${comp.toLocaleString("en")} competitors`
+          : r.map.size > 0
+            ? "map updated"
+            : "reply";
+      return { id: r.id, q: r.q, kind, steps, chip, live, hasLayers: r.map.size > 0 };
     });
+    // waveState/caption/latest all move with `messages`+`busy`; `signature` covers layer changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, busy, caption, signature]);
+
+  const liveRunId = runs.length ? runs[runs.length - 1].id : null;
+  const viewingId = selectedRunId ?? liveRunId;
+  const viewingIdx = runs.findIndex((r) => r.id === viewingId);
+  const scrubLabel = runs.length
+    ? `run ${(viewingIdx < 0 ? runs.length : viewingIdx + 1)} / ${runs.length}`
+    : "—";
+  const canScrub = runs.length > 1;
+  const stepRun = (delta: number) => {
+    if (!runs.length) return;
+    const base = viewingIdx < 0 ? runs.length - 1 : viewingIdx;
+    const next = Math.max(0, Math.min(runs.length - 1, base + delta));
+    setSelectedRunId(runs[next].id);
+  };
+  const toggleRun = (id: string) =>
+    setOpenRuns((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  // The pins the map is currently showing: the live picks, or a scrubbed run's snapshotted picks.
+  const displayPicks = useMemo(() => {
+    if (selectedRunId && selectedRunId !== liveRunId) {
+      const snap = runSnapshots.current.get(selectedRunId);
+      return (snap?.picks?.features ?? []) as GeoJSON.Feature<GeoJSON.Point, PickProps>[];
+    }
+    return picks;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRunId, liveRunId, picks]);
+
+  // Snapshot the resolved layers when a run finishes (busy true→false), so scrub can replay it.
+  useEffect(() => {
+    if (prevBusy.current && !busy) {
+      const finished = runs[runs.length - 1];
+      if (finished && Object.keys(store.current).length > 0)
+        runSnapshots.current.set(finished.id, { ...store.current });
+    }
+    prevBusy.current = busy;
+  }, [busy, runs]);
+
+  // Scrub: when the user selects a past run, replay its snapshot onto the map; selecting the live
+  // run (or returning to it) restores the current data. Guarded so it never fights the live paint —
+  // it only fires on an actual selection change, and replayFrom no-ops while a reveal is running.
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    if (selectedRunId === null || selectedRunId === liveRunId) {
+      void replayFrom(store.current);
+      return;
+    }
+    const snap = runSnapshots.current.get(selectedRunId);
+    if (snap) void replayFrom(snap);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRunId]);
+
+  // Honest "session resumed": true only if the transport restored assistant messages before the
+  // user sent anything this session. With no persistence this never fires and the pill stays hidden.
+  useEffect(() => {
+    if (!sentThisSession.current && messages.some((m) => m.role === "assistant")) setResumed(true);
+  }, [messages]);
+
+  /**
+   * Ask the agent. Same reset-on-submit as before (store/painted/gen cleared, box emptied) so the
+   * happy path is untouched; additionally returns the map to live-follow. The run stack keeps the
+   * full history regardless, which is where a conversational turn stays visible.
+   */
+  const ask = useCallback(
+    (text: string) => {
+      if (!text.trim() || busy) return;
+      setError(null);
+      setSelected(null);
+      setSelectedRunId(null);
+      sentThisSession.current = true;
+      store.current = {};
+      painted.current.clear();
+      gen.current++;
+      sendMessage({ text });
+      setInput("");
+    },
+    [busy, sendMessage],
+  );
+
+  /** Clear the session and the map — the top-bar ⟲. Wipes client state; Postgres history is kept. */
+  const resetSession = useCallback(() => {
+    gen.current++;
+    store.current = {};
+    painted.current.clear();
+    runSnapshots.current.clear();
+    setSelected(null);
+    setSelectedRunId(null);
+    setError(null);
+    setResumed(false);
+    setMessages([]);
+    const m = map.current;
+    if (m && m.getLayer("opportunity")) {
+      for (const id of LAYER_IDS)
+        (m.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(EMPTY);
+      m.setPaintProperty("opportunity", "fill-opacity", 0);
+      m.setPaintProperty("opportunity-line", "line-opacity", 0);
+      m.setPaintProperty("competitors", "circle-opacity", 0);
+      m.setPaintProperty("competitors", "circle-radius", 0);
+      if (m.getLayer("catchment")) {
+        m.setPaintProperty("catchment", "fill-opacity", 0);
+        m.setPaintProperty("catchment-line", "line-opacity", 0);
+      }
+      if (m.getLayer("saved")) m.setPaintProperty("saved", "circle-stroke-opacity", 0);
+    }
+    bumpStore();
+  }, [setMessages]);
+
+  const liveText = busy ? "assembling" : "ready";
+  const lastRun = runs.length ? runs[runs.length - 1] : null;
 
   return (
     <div
       style={{
-        position: "relative",
+        display: "grid",
+        gridTemplateColumns: "302px 1fr 316px",
+        gridTemplateRows: "46px 1fr",
         width: "100vw",
         height: "100vh",
         overflow: "hidden",
@@ -883,31 +1122,14 @@ export function Chat() {
       }}
     >
       <style>{CSS}</style>
-      <div ref={container} style={{ position: "absolute", inset: 0 }} />
 
-      <PickMarkers
-        map={map}
-        ready={ready}
-        picks={picks}
-        visible={visible.picks}
-        onSelect={setSelected}
-      />
-
-      {/* Transient status. The only indeterminate indicator in the product, and it disappears
-          the moment there is something real to look at. */}
-      {statusText && (
-        <div className="wh-pill">
-          <span className="wh-dot" />
-          <span>{statusText}</span>
-        </div>
-      )}
-
-      <div className="wh-rail">
-        <header style={{ display: "flex", alignItems: "center", gap: 9 }}>
+      {/* ============================ TOP BAR ============================ */}
+      <div className="wh-topbar">
+        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
           <div
             style={{
-              width: 22,
-              height: 22,
+              width: 20,
+              height: 20,
               borderRadius: 5,
               background: C.win,
               display: "flex",
@@ -915,146 +1137,726 @@ export function Chat() {
               justifyContent: "center",
             }}
           >
-            <div style={{ width: 9, height: 9, borderRadius: "50%", border: `2px solid ${C.bg}` }} />
+            <div style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${C.bg}` }} />
           </div>
-          <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-.01em" }}>WhereHouse</div>
+          <div style={{ fontWeight: 700, fontSize: 14.5, letterSpacing: "-.01em" }}>WhereHouse</div>
           <div
             style={{
-              marginLeft: "auto",
               fontFamily: MONO,
-              fontSize: 10,
+              fontSize: 9.5,
               letterSpacing: ".1em",
               color: C.dim,
               textTransform: "uppercase",
+              paddingTop: 1,
             }}
           >
-            site selection
+            site selection terminal
           </div>
-        </header>
+        </div>
 
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!input.trim() || busy) return;
-            setError(null);
-            setSelected(null);
-            store.current = {};
-            painted.current.clear();
-            gen.current++;
-            sendMessage({ text: input });
+        {/* Live status, driven by the real run state: pulsing "assembling" while busy, steady
+            "ready" when idle. The dot never wears the pick yellow (chrome only). */}
+        <div
+          style={{
+            marginLeft: 14,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontFamily: MONO,
+            fontSize: 11,
+            color: "#9aa4ad",
           }}
-          style={{ position: "relative", margin: 0 }}
         >
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="where should I open a bakery in Berlin?"
-            className="wh-ask"
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: C.accent,
+              animation: busy ? "wh-pulse 1s infinite" : "none",
+            }}
           />
-          <button type="submit" aria-label="ask" disabled={busy} className="wh-go">
-            →
-          </button>
-        </form>
+          <span>{liveText}</span>
+        </div>
 
-        {/* Market at a glance (feature 006): a compact stat strip that frames the map as a dashboard.
-            It appears once the first tile has a datum and fills in as the assembly runs — each tile
-            stays absent (never a 0 or a dash-as-fact) until its own layer has landed. 3-4 tiles max,
-            read at a glance, serving the map rather than becoming a wall of numbers. */}
-        {glance.length > 0 && (
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Only shown when the transport genuinely restored a prior conversation (see `resumed`).
+              With no persistence it never appears — never faked. */}
+          {resumed && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontFamily: MONO,
+                fontSize: 9.5,
+                color: "#8a949d",
+                padding: "3px 9px",
+                borderRadius: 20,
+                background: "rgba(111,240,224,.08)",
+                border: "1px solid rgba(111,240,224,.2)",
+              }}
+            >
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.accent }} />
+              session resumed
+            </div>
+          )}
+          {/* Scrub the map through past agent runs. Subtle/disabled until there is more than one. */}
+          <div className="wh-scrub" style={{ opacity: canScrub ? 1 : 0.5 }}>
+            <div
+              onClick={() => canScrub && stepRun(-1)}
+              title="rewind map to the previous run"
+              className="wh-scrub-btn"
+            >
+              ◀
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 10, color: "#8a949d", minWidth: 52, textAlign: "center" }}>
+              {scrubLabel}
+            </div>
+            <div
+              onClick={() => canScrub && stepRun(1)}
+              title="advance the map to the next run"
+              className="wh-scrub-btn"
+            >
+              ▶
+            </div>
+          </div>
+          <div onClick={resetSession} title="clear the session" className="wh-topreset">
+            ⟲
+          </div>
+        </div>
+      </div>
+
+      {/* ======================= LEFT: AGENT RUNS ======================= */}
+      <div className="wh-col-left">
+        <div className="wh-col-head">
+          <Label inline>Agent runs</Label>
+          <div style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 9, color: "#4c5560" }}>
+            chat.agent()
+          </div>
+        </div>
+
+        <div className="wh-scroll wh-runs">
+          {runs.length === 0 && (
+            <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, padding: "8px 2px", lineHeight: 1.6 }}>
+              no runs yet — ask a question below to start the assembly.
+            </div>
+          )}
+          {runs.map((r) => {
+            const open = openRuns.has(r.id) || r.live;
+            const active = r.id === viewingId;
+            const kindC = RUN_KIND[r.kind];
+            return (
+              <div
+                key={r.id}
+                style={{
+                  marginBottom: 9,
+                  borderRadius: 10,
+                  background: active ? "rgba(111,240,224,.05)" : "rgba(255,255,255,.02)",
+                  border: `1px solid ${active ? "rgba(111,240,224,.22)" : "rgba(255,255,255,.06)"}`,
+                }}
+              >
+                <div
+                  onClick={() => setSelectedRunId(r.id)}
+                  style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "10px 11px", cursor: "pointer" }}
+                >
+                  <div
+                    title={r.kind}
+                    style={{ flex: "none", marginTop: 4, width: 8, height: 8, borderRadius: "50%", background: kindC.dot }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 12.5,
+                        lineHeight: 1.35,
+                        color: active ? "#eef3f5" : "#c7cfd6",
+                        fontWeight: active ? 600 : 400,
+                        textWrap: "pretty",
+                      }}
+                    >
+                      {r.q}
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 5,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        fontFamily: MONO,
+                        fontSize: 9,
+                        letterSpacing: ".03em",
+                      }}
+                    >
+                      <span style={{ padding: "1px 6px", borderRadius: 20, background: kindC.bg, color: kindC.color }}>
+                        {kindC.label}
+                      </span>
+                      <span style={{ color: "#5c6771" }}>{r.chip}</span>
+                      {r.live && <span style={{ color: "#f0d878" }}>· live</span>}
+                    </div>
+                  </div>
+                  {r.steps.length > 0 && (
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleRun(r.id);
+                      }}
+                      style={{ flex: "none", color: "#69737d", fontSize: 10, padding: "2px 3px", cursor: "pointer" }}
+                    >
+                      {open ? "▾" : "▸"}
+                    </div>
+                  )}
+                </div>
+
+                {open && r.steps.length > 0 && (
+                  <div style={{ padding: "2px 12px 11px 30px" }}>
+                    {r.steps.map((st) => {
+                      const eng = ENGINE_TAG[st.engine] ?? ENGINE_TAG.agent;
+                      return (
+                        <div
+                          key={st.key}
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "2.5px 0", fontFamily: MONO, fontSize: 10.5 }}
+                        >
+                          <span
+                            style={{
+                              width: 11,
+                              textAlign: "center",
+                              color: st.state === "done" ? C.accent : st.state === "active" ? "#f0d878" : "#39424c",
+                            }}
+                          >
+                            {st.state === "done" ? "●" : st.state === "active" ? "◐" : "○"}
+                          </span>
+                          <span style={{ color: st.state === "pending" ? C.dim : "#cdd6dd" }}>{st.label}</span>
+                          <span
+                            style={{
+                              marginLeft: "auto",
+                              fontSize: 8.5,
+                              letterSpacing: ".05em",
+                              padding: "0 5px",
+                              borderRadius: 10,
+                              background: eng.bg,
+                              color: eng.col,
+                            }}
+                          >
+                            {st.engine}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {/* A finished run that produced layers can be re-thrown onto the map — same
+                        client-side choreography as Replay, no agent, no spend. */}
+                    {!r.live && r.hasLayers && (
+                      <div
+                        onClick={() => setSelectedRunId(r.id)}
+                        style={{
+                          marginTop: 8,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "4px 10px",
+                          borderRadius: 7,
+                          background: "rgba(255,255,255,.05)",
+                          border: "1px solid rgba(255,255,255,.1)",
+                          color: "#cdd6dd",
+                          fontSize: 10.5,
+                          cursor: "pointer",
+                        }}
+                      >
+                        ▶ replay this run onto the map
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* The composer: the same input + send the rail used to carry, now pinned to the bottom of
+            the run stack. Steering indicator while streaming, then the suggestion chips. */}
+        <div className="wh-composer">
+          {busy && (
+            <div
+              style={{
+                marginBottom: 7,
+                display: "flex",
+                alignItems: "center",
+                gap: 7,
+                fontFamily: MONO,
+                fontSize: 9.5,
+                color: "#f0d878",
+              }}
+            >
+              <span className="wh-spin" />
+              steering allowed — nudge the run mid-flight
+            </div>
+          )}
+          {error && (
+            <div style={{ color: C.competitor, fontSize: 11, fontFamily: MONO, marginBottom: 7 }}>{error}</div>
+          )}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              ask(input);
+            }}
+            style={{ position: "relative", margin: 0 }}
+          >
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="where should I open a bakery in Berlin?"
+              className="wh-ask"
+            />
+            <button type="submit" aria-label="send" disabled={busy} className="wh-go">
+              →
+            </button>
+          </form>
+          <div style={{ marginTop: 7, display: "flex", gap: 5, flexWrap: "wrap" }}>
+            {SUGGESTIONS.map((s) => (
+              <div key={s} onClick={() => ask(s)} className="wh-chip">
+                {s}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ==================== CENTER: KPI STRIP + MAP ==================== */}
+      <div className="wh-col-center">
+        {/* KPI strip: four tiles, each ABSENT (never 0) until its own datum lands. Same values the
+            rail's "market at a glance" showed, now framing the map. */}
+        <div className="wh-kpi">
+          <div className="wh-tile">
+            <div className="wh-tile-label">Competitors</div>
+            {competitorCount !== undefined ? (
+              <div className="wh-tile-val">
+                <span className="wh-tile-num">{competitorCount.toLocaleString("en")}</span>
+                <span className="wh-tile-unit">in view</span>
+              </div>
+            ) : (
+              <div className="wh-tile-absent">awaiting layer</div>
+            )}
+          </div>
+
+          <div className="wh-tile">
+            <div className="wh-tile-label" style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              Top opportunity
+              {/* The one legitimate pick-yellow dot in the chrome: it stands for the #1 pick. */}
+              <span
+                style={{ width: 6, height: 6, borderRadius: "50%", background: topScore !== undefined ? C.win : "#39424c" }}
+              />
+            </div>
+            {topScore !== undefined ? (
+              <div className="wh-tile-val">
+                <span className="wh-tile-num">{Math.round(topScore)}</span>
+                <span className="wh-tile-unit">/ 100 · pick #1</span>
+              </div>
+            ) : (
+              <div className="wh-tile-absent">awaiting ranking</div>
+            )}
+          </div>
+
+          <div className="wh-tile">
+            <div className="wh-tile-label">Median opportunity</div>
+            {medianOpportunity !== undefined ? (
+              <div className="wh-tile-val">
+                <span className="wh-tile-num">{Math.round(medianOpportunity)}</span>
+                <span className="wh-tile-unit">/ 100 · all cells</span>
+              </div>
+            ) : (
+              <div className="wh-tile-absent">awaiting surface</div>
+            )}
+          </div>
+
+          <div className="wh-tile">
+            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <div className="wh-tile-label">Momentum</div>
+              {trend && (
+                <div
+                  style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 8, color: "#565f69" }}
+                  title="relative momentum from OSM edit history — not an absolute count"
+                >
+                  since &apos;{String(trend.fromYear).slice(-2)}
+                </div>
+              )}
+            </div>
+            {trend ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2, minWidth: 0 }}>
+                {trend.enoughHistory && trend.monthly.length > 1 ? (
+                  <div style={{ width: 76, flex: "none" }}>
+                    <Sparkline points={trend.monthly.map((m) => m.count)} rising={trend.direction === "rising"} />
+                  </div>
+                ) : (
+                  // absent != 0: too little history draws a dashed baseline, never a fabricated trend.
+                  <svg width="76" height="30" viewBox="0 0 118 34" style={{ flex: "none" }}>
+                    <line x1="2" y1="17" x2="116" y2="17" stroke="#3a434d" strokeWidth="1.4" strokeDasharray="3 4" />
+                  </svg>
+                )}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 600, color: trend.direction === "rising" ? C.accent : "#b7c0c8" }}>
+                      {trend.direction}
+                    </span>
+                    {trend.pctChange != null && (
+                      <span style={{ fontFamily: MONO, fontSize: 11, color: "#8a949d" }}>
+                        {trend.pctChange >= 0 ? "+" : ""}
+                        {trend.pctChange}%
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 8, color: "#565f69", marginTop: 1 }}>OSM history · ohsome</div>
+                </div>
+              </div>
+            ) : (
+              <div className="wh-tile-absent">awaiting history</div>
+            )}
+          </div>
+        </div>
+
+        {/* The map well — the MapLibre map lives here now, inside the centre column. */}
+        <div className="wh-well">
+          <div ref={container} style={{ position: "absolute", inset: 0 }} />
+
+          <PickMarkers map={map} ready={ready} picks={displayPicks} visible={visible.picks} onSelect={setSelected} />
+
+          {/* Transient status, top-centre of the well. The only indeterminate indicator, gone the
+              moment there is something real to look at. */}
+          {statusText && (
+            <div className="wh-well-pill">
+              <span className="wh-dot" />
+              <span>{statusText}</span>
+            </div>
+          )}
+
+          {/* The caption: whatever the model streamed — never a sentence written here. The caret
+              blinks only while tokens still arrive. Measured/estimated chips as before. */}
+          {caption && (
+            <div className="wh-caption">
+              {lastRun && (
+                <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 6 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: RUN_KIND[lastRun.kind].dot }} />
+                  <span
+                    style={{
+                      fontFamily: MONO,
+                      fontSize: 9,
+                      letterSpacing: ".08em",
+                      color: "#8a949d",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {RUN_KIND[lastRun.kind].label}
+                  </span>
+                </div>
+              )}
+              <div style={{ fontSize: 14, lineHeight: 1.5, color: "#eaf1f2", textWrap: "pretty" }}>
+                {caption}
+                {busy && <span className="wh-caret">▋</span>}
+              </div>
+              <div style={{ marginTop: 9, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {catchmentShown && <Chip tone="accent">CATCHMENT · MEASURED</Chip>}
+                <Chip tone="accent">SUPPLY · MEASURED</Chip>
+                <Chip>DEMAND · EST. 2023</Chip>
+              </div>
+            </div>
+          )}
+
+          {/* Legend, top-right of the well. Each row appears only for a layer genuinely on the map
+              and visible, so the key never describes something that is not there. */}
+          {((latest.has("opportunity") && visible.opportunity) ||
+            (latest.has("competitors") && visible.competitors) ||
+            catchmentShown) && (
+            <div className="wh-legend">
+              {latest.has("opportunity") && visible.opportunity && (
+                <div className="wh-legend-row">
+                  <span
+                    style={{
+                      width: 34,
+                      height: 7,
+                      borderRadius: 3,
+                      background: "linear-gradient(90deg,rgba(22,46,68,.6),#1c5a7a,#2b9fae,#57d8cf,#8ff2dd)",
+                    }}
+                  />
+                  <span style={{ color: "#9aa4ad" }}>opportunity · est.</span>
+                </div>
+              )}
+              {latest.has("competitors") && visible.competitors && (
+                <div className="wh-legend-row">
+                  <span style={{ width: 34, display: "flex", justifyContent: "center", gap: 3 }}>
+                    <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.competitor }} />
+                    <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.competitor }} />
+                  </span>
+                  <span style={{ color: "#9aa4ad" }}>competitors · measured</span>
+                </div>
+              )}
+              {catchmentShown && (
+                <div className="wh-legend-row">
+                  <span style={{ width: 34, display: "flex", justifyContent: "center" }}>
+                    <span
+                      style={{
+                        width: 22,
+                        height: 9,
+                        borderRadius: 5,
+                        background: "rgba(111,240,224,.14)",
+                        border: `1px solid ${C.accent}`,
+                      }}
+                    />
+                  </span>
+                  <span style={{ color: "#9aa4ad" }}>10-min walk · measured</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ================= RIGHT: ANSWER + CONTROLS ================= */}
+      <div className="wh-scroll wh-col-right">
+        {/* No picks ⇒ no heading. An empty "Top picks" panel reads as a failed load; the section
+            simply not existing yet reads as "not happened yet", which is the truth. */}
+        {picks.length > 0 && (
           <section>
-            <Label>Market at a glance</Label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-              {glance.map((t) => (
-                <StatTile key={t.key} label={t.label} value={t.value} unit={t.unit} accent={t.accent} />
-              ))}
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <Label inline>Top picks</Label>
+              {/* The pins are the agent's ranking, computed at neutral. Dragging a slider recolours
+                  the surface but does NOT re-rank; the UI says which it is in two words. */}
+              {!neutral && (
+                <span style={{ marginLeft: "auto" }}>
+                  <Chip>RANKED AT NEUTRAL</Chip>
+                </span>
+              )}
+            </div>
+            <div style={{ marginTop: 8 }}>
+              {picks.map((f) => {
+                const p = f.properties;
+                const top = p.rank === 1;
+                const score = scale ? gapDisplay(p as CellProps, scale, weights) : p.gap;
+                const isSaved = savedH3.has(p.h3);
+                const isSaving = saving.has(p.h3);
+                return (
+                  <div
+                    key={p.rank}
+                    onClick={() => setSelected(p.rank)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 11,
+                      padding: "9px 10px",
+                      marginBottom: 6,
+                      borderRadius: 9,
+                      cursor: "pointer",
+                      background: top ? "rgba(250,255,105,.07)" : "rgba(255,255,255,.03)",
+                      border: `1px solid ${
+                        selected === p.rank
+                          ? C.accent
+                          : top
+                            ? "rgba(250,255,105,.25)"
+                            : "rgba(255,255,255,.07)"
+                      }`,
+                    }}
+                  >
+                    <div
+                      style={{
+                        flex: "none",
+                        width: 26,
+                        height: 26,
+                        borderRadius: "50%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontFamily: MONO,
+                        fontWeight: 600,
+                        fontSize: 12,
+                        background: top ? C.win : "rgba(255,255,255,.08)",
+                        color: top ? C.bg : "#c7cfd6",
+                      }}
+                    >
+                      {p.rank}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {/* `place` only exists because a point-in-polygon test put the cell inside that
+                          polygon. No name ⇒ no line — never a placeholder. */}
+                      {p.place && (
+                        <div
+                          style={{
+                            fontSize: 12.5,
+                            fontWeight: 600,
+                            color: "#eef3f5",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {p.place}
+                        </div>
+                      )}
+                      <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
+                        {score} / 100 · ~{Number(p.pop).toLocaleString("en")} people · {p.sup} nearby
+                      </div>
+                      {/* EDITORIAL neighbourhood-fit (feature 005). Present ONLY when the ring holds a
+                          complementary trade; absent != 0, never a "0". Chrome-grey tag, never accent. */}
+                      {p.topNeighbours && p.topNeighbours.length > 0 && (
+                        <div
+                          style={{
+                            fontFamily: MONO,
+                            fontSize: 9.5,
+                            color: "#7c858f",
+                            marginTop: 3,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <span
+                            style={{
+                              flex: "none",
+                              fontSize: 8,
+                              letterSpacing: ".1em",
+                              textTransform: "uppercase",
+                              padding: "1px 4px",
+                              borderRadius: 3,
+                              background: "rgba(255,255,255,.06)",
+                              color: "#8a949d",
+                            }}
+                          >
+                            editorial
+                          </span>
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {p.topNeighbours
+                              .slice(0, 3)
+                              .map((nb) => nb.category.replace(/_/g, " "))
+                              .join(" · ")}{" "}
+                            nearby
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void savePick(f);
+                      }}
+                      disabled={!answerMeta || isSaving || isSaved}
+                      className={isSaved ? "wh-save wh-save-done" : "wh-save"}
+                    >
+                      {isSaved ? "✓ saved" : isSaving ? "saving…" : "save"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: 5, fontFamily: MONO, fontSize: 8.5, color: "#565f69", lineHeight: 1.5 }}>
+              ◆ editorial affinity · a hand-authored heuristic, not data
             </div>
           </section>
         )}
 
-        {caption && (
-          <div
-            style={{
-              padding: "12px 13px",
-              borderRadius: 10,
-              background: "rgba(111,240,224,.06)",
-              border: "1px solid rgba(111,240,224,.18)",
-            }}
-          >
-            {/*
-             * Whatever the model streamed — never a sentence written here.
-             *
-             * The comp hardcodes "…almost no competitor within a 15-minute walk". We have no
-             * 15-minute walk: supply is an H3 k=1 ring. Putting the comp's sentence in the
-             * client would make the UI assert something the data cannot support, and the model
-             * is separately forbidden from inventing (SYSTEM_PROMPT in trigger/chat.ts). The
-             * caption is the agent's claim, and it is the agent's to defend.
-             *
-             * The caret is real: it blinks only while tokens are still arriving. No typewriter —
-             * the text genuinely streams, so faking the typing would be animating over the one
-             * moment that needs no help.
-             */}
-            <div style={{ fontSize: 13.5, lineHeight: 1.5, color: "#eaf1f2", textWrap: "pretty" }}>
-              {caption}
-              {busy && <span className="wh-caret">▋</span>}
+        {/* Saved history. Like Top picks, no saves ⇒ no heading. Postgres-backed, survives reload;
+            today's market gap is joined in from the compareSavedSites layer by coordinate. */}
+        {savedSites.length > 0 && (
+          <section>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <Label inline>Your saved sites</Label>
+              <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 9, color: C.faint }}>
+                {savedSites.length}
+              </span>
             </div>
-            <div style={{ marginTop: 9, display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {/*
-               * The comp's chips are CATCHMENT · MEASURED and DEMAND · EST. 2023.
-               *
-               * CATCHMENT · MEASURED is no longer cut: it appears **iff** a real Valhalla contour
-               * is genuinely on screen (`catchmentShown`, FR-003). When the pick has no measured
-               * catchment the tool emits nothing, so the chip stays absent — a drawn nothing and
-               * an undrawn nothing are different claims. Supply stays measured (a count of real
-               * Overture POIs), so the measured/estimated contrast the chips exist for holds.
-               */}
-              {catchmentShown && <Chip tone="accent">CATCHMENT · MEASURED</Chip>}
-              <Chip tone="accent">SUPPLY · MEASURED</Chip>
-              <Chip>DEMAND · EST. 2023</Chip>
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              {savedSites.map((s) => {
+                const props = marketByCoord.get(`${s.lon.toFixed(5)},${s.lat.toFixed(5)}`);
+                const gap = props?.marketGap;
+                return (
+                  <div key={s.id} className="wh-saved-row">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                          color: "#eef3f5",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {s.label}
+                      </div>
+                      <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
+                        {/* An unscored save renders "unscored", never 0. */}
+                        {s.score != null ? `${s.score} / 100` : "unscored"} · {s.status}
+                      </div>
+                    </div>
+                    {/* Today's market gap, from compareSavedSites. Absent — not 0 — outside today's
+                        scored set, so a dash rather than a number. */}
+                    <div style={{ textAlign: "right", flex: "none" }}>
+                      <div
+                        style={{
+                          fontFamily: MONO,
+                          fontSize: 9,
+                          letterSpacing: ".08em",
+                          color: C.faint,
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        today
+                      </div>
+                      <div style={{ fontFamily: MONO, fontSize: 13, color: gap != null ? C.accent : C.dim }}>
+                        {gap != null ? gap : "—"}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          </div>
-        )}
-
-        {/* Historical momentum (feature 004): the direction badge + sparkline of the OSM-history
-            series the categoryTrend tool streamed, sat in the answer area next to the caption's
-            measured/estimated chips. A market's trend the static GAP snapshot cannot see. */}
-        {trend && <TrendSparkline trend={trend} />}
-
-        {error && (
-          <div style={{ color: C.competitor, fontSize: 12, fontFamily: MONO }}>{error}</div>
+            {/* Ask the agent to run compareSavedSites — a chat message, not a direct tool call. */}
+            <button
+              onClick={() => {
+                if (busy) return;
+                setError(null);
+                sendMessage({ text: "How do my saved sites compare to the market?" });
+              }}
+              disabled={busy}
+              className="wh-compare"
+            >
+              Compare vs the market
+            </button>
+          </section>
         )}
 
         <section>
-          <Label>Assembly</Label>
-          {WAVES.map((w) => {
-            const st = waveState(w);
-            return (
-              <div
-                key={w.key}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 9,
-                  padding: "3px 0",
-                  fontFamily: MONO,
-                  fontSize: 11.5,
-                }}
-              >
-                <span
-                  style={{
-                    width: 14,
-                    textAlign: "center",
-                    color: st === "done" ? C.accent : st === "active" ? C.win : "#39424c",
-                  }}
-                >
-                  {st === "done" ? "●" : st === "active" ? "◐" : "○"}
-                </span>
-                <span style={{ color: st === "done" ? "#cdd6dd" : st === "active" ? "#eef3f5" : C.dim }}>
-                  {w.label}
-                </span>
-                <span style={{ marginLeft: "auto", color: C.faint, fontSize: 10 }}>{w.source}</span>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 }}>
+            <Label inline>Re-weight</Label>
+            <div style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 9, color: C.faint }}>
+              instant · client-side
+            </div>
+          </div>
+
+          {/* Three sliders (not the comp's four): "Low rent" is cut (no rent data), "Footfall" is
+              renamed Residents (Kontur counts who lives in a cell, not foot traffic). Maps over
+              FACTORS, so Accessibility appears automatically. See components/score.ts. */}
+          {FACTORS.map((f) => (
+            <div key={f.id} style={{ opacity: scale ? 1 : 0.4 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "#b7c0c8" }}>
+                <span>{f.label}</span>
+                <span style={{ fontFamily: MONO, color: C.accent }}>{weights[f.id]}%</span>
               </div>
-            );
-          })}
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={weights[f.id]}
+                disabled={!scale}
+                onChange={(e) => setWeights((w) => ({ ...w, [f.id]: +e.target.value }))}
+              />
+              <div style={{ fontFamily: MONO, fontSize: 9.5, color: "#7c858f", marginTop: -4, marginBottom: 6 }}>
+                {f.note}
+              </div>
+            </div>
+          ))}
+
+          {!neutral && (
+            <button onClick={() => setWeights({ ...NEUTRAL })} className="wh-reset">
+              ↺ back to the agent&apos;s weighting
+            </button>
+          )}
         </section>
 
         <section>
@@ -1069,8 +1871,7 @@ export function Chat() {
                   width: 44,
                   height: 9,
                   borderRadius: 3,
-                  background:
-                    "linear-gradient(90deg,rgba(20,44,66,.5),#1c5a7a,#2b9fae,#57d8cf,#8ff2dd)",
+                  background: "linear-gradient(90deg,rgba(20,44,66,.5),#1c5a7a,#2b9fae,#57d8cf,#8ff2dd)",
                 }}
               />
             }
@@ -1082,17 +1883,13 @@ export function Chat() {
             swatch={
               <span style={{ width: 44, display: "flex", gap: 4, justifyContent: "center" }}>
                 {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    style={{ width: 6, height: 6, borderRadius: "50%", background: C.competitor }}
-                  />
+                  <span key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: C.competitor }} />
                 ))}
               </span>
             }
           />
-          {/* The not-measured counter lives with the surface it describes: a distinct slate hue
-              paints the cells whose walk we could not measure, and this is how many, per answer.
-              Only meaningful while Accessibility is weighted in (FR-010). */}
+          {/* The not-measured counter lives with the surface it describes; only meaningful while
+              Accessibility is weighted in (FR-010). */}
           {weights.accessibility > 0 && notMeasured !== undefined && (
             <div
               style={{
@@ -1105,9 +1902,7 @@ export function Chat() {
                 color: "#8a949d",
               }}
             >
-              <span
-                style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(174,183,199,0.7)", flex: "none" }}
-              />
+              <span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(174,183,199,0.7)", flex: "none" }} />
               {notMeasured.toLocaleString("en")} cells · not measured
             </div>
           )}
@@ -1155,8 +1950,6 @@ export function Chat() {
               </span>
             }
           />
-          {/* Independent toggle for the user's saved rings — a hollow grey ring in the swatch to
-              echo the map marker and to read as "yours", distinct from the solid pick disc above. */}
           <Toggle
             on={visible.saved}
             onClick={() => setVisible((v) => ({ ...v, saved: !v.saved }))}
@@ -1177,286 +1970,7 @@ export function Chat() {
           />
         </section>
 
-        <section>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 }}>
-            <Label inline>Re-weight</Label>
-            <div style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 9, color: C.faint }}>
-              instant · client-side
-            </div>
-          </div>
-
-          {/*
-           * Three sliders, not the comp's four.
-           *
-           * "Low rent" is cut — we hold no rent data of any kind, and the comp fills it with a
-           * Gaussian. "Accessibility" has landed: it is the Valhalla walk catchment as a real
-           * factor (its provenance note reads "Valhalla · residents within a 10-min walk"), and
-           * it appears here automatically because this maps over FACTORS. "Footfall" is renamed
-           * **Residents**, because Kontur counts who lives in a cell and that is not foot traffic.
-           * Each control here moves a number that came out of the database. See components/score.ts.
-           */}
-          {FACTORS.map((f) => (
-            <div key={f.id} style={{ opacity: scale ? 1 : 0.4 }}>
-              <div
-                style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "#b7c0c8" }}
-              >
-                <span>{f.label}</span>
-                <span style={{ fontFamily: MONO, color: C.accent }}>{weights[f.id]}%</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={weights[f.id]}
-                disabled={!scale}
-                onChange={(e) => setWeights((w) => ({ ...w, [f.id]: +e.target.value }))}
-              />
-              {/* The note is what stops "Residents" being read as "Footfall": it names the
-                  source and the unit. Rendered at #7c858f rather than the chrome grey because a
-                  provenance line nobody can read is decoration — the first screenshot of this
-                  rail had it at #4c5560/9px and it was invisible against the blurred map. */}
-              <div style={{ fontFamily: MONO, fontSize: 9.5, color: "#7c858f", marginTop: -4, marginBottom: 6 }}>
-                {f.note}
-              </div>
-            </div>
-          ))}
-
-          {!neutral && (
-            <button onClick={() => setWeights({ ...NEUTRAL })} className="wh-reset">
-              ↺ back to the agent&apos;s weighting
-            </button>
-          )}
-        </section>
-
-        {/* No picks ⇒ no heading. An empty "Top picks" panel with a blank space under it reads
-            as a thing that failed to load; the section simply not existing yet reads as a thing
-            that has not happened yet, which is the truth. */}
-        {picks.length > 0 && (
-        <section>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-            <Label inline>Top picks</Label>
-            {/*
-             * The pins are the agent's ranking, computed at neutral. Dragging a slider recolours
-             * the surface underneath them but does NOT re-rank them — re-ranking client-side
-             * would produce cells with no `place`, and the caption (which names the agent's #1)
-             * would then be describing a pin that is no longer #1. So the pins stay put, their
-             * scores update under the new weighting, and the UI says which it is in two words
-             * rather than letting the user infer it wrongly.
-             */}
-            {!neutral && (
-              <span style={{ marginLeft: "auto" }}>
-                <Chip>RANKED AT NEUTRAL</Chip>
-              </span>
-            )}
-          </div>
-          <div style={{ marginTop: 8 }}>
-            {picks.map((f) => {
-              const p = f.properties;
-              const top = p.rank === 1;
-              const score = scale ? gapDisplay(p as CellProps, scale, weights) : p.gap;
-              const isSaved = savedH3.has(p.h3);
-              const isSaving = saving.has(p.h3);
-              return (
-                <div
-                  key={p.rank}
-                  onClick={() => setSelected(p.rank)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 11,
-                    padding: "9px 10px",
-                    marginBottom: 6,
-                    borderRadius: 9,
-                    cursor: "pointer",
-                    background: top ? "rgba(250,255,105,.07)" : "rgba(255,255,255,.03)",
-                    border: `1px solid ${
-                      selected === p.rank
-                        ? C.accent
-                        : top
-                          ? "rgba(250,255,105,.25)"
-                          : "rgba(255,255,255,.07)"
-                    }`,
-                  }}
-                >
-                  <div
-                    style={{
-                      flex: "none",
-                      width: 26,
-                      height: 26,
-                      borderRadius: "50%",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontFamily: MONO,
-                      fontWeight: 600,
-                      fontSize: 12,
-                      background: top ? C.win : "rgba(255,255,255,.08)",
-                      color: top ? C.bg : "#c7cfd6",
-                    }}
-                  >
-                    {p.rank}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {/* `place` only exists because a point-in-polygon test put the cell inside
-                        that polygon (geo.districts). No name ⇒ no line — never a placeholder. */}
-                    {p.place && (
-                      <div
-                        style={{
-                          fontSize: 12.5,
-                          fontWeight: 600,
-                          color: "#eef3f5",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {p.place}
-                      </div>
-                    )}
-                    <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
-                      {score} / 100 · ~{Number(p.pop).toLocaleString("en")} people · {p.sup} nearby
-                    </div>
-                    {/* EDITORIAL neighbourhood-fit (feature 005). Present ONLY when the pick's ring
-                        holds a complementary trade — a pick with none carries no `topNeighbours`
-                        key and this line renders nothing (absent != 0, never a "0", FR-006). It is
-                        a hand-authored heuristic, NOT the measured GAP score above, so the tag reads
-                        EDITORIAL and it is never a re-weight factor. Same muted mono as the slider
-                        provenance notes; the tag is chrome-grey, never an accent, so it cannot be
-                        read as a data value. */}
-                    {p.topNeighbours && p.topNeighbours.length > 0 && (
-                      <div
-                        style={{
-                          fontFamily: MONO,
-                          fontSize: 9.5,
-                          color: "#7c858f",
-                          marginTop: 3,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 6,
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <span
-                          style={{
-                            flex: "none",
-                            fontSize: 8,
-                            letterSpacing: ".1em",
-                            textTransform: "uppercase",
-                            padding: "1px 4px",
-                            borderRadius: 3,
-                            background: "rgba(255,255,255,.06)",
-                            color: "#8a949d",
-                          }}
-                        >
-                          editorial
-                        </span>
-                        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {p.topNeighbours
-                            .slice(0, 3)
-                            .map((nb) => nb.category.replace(/_/g, " "))
-                            .join(" · ")}{" "}
-                          nearby
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  {/* Save this pick to the user's shortlist. stopPropagation so it does not also
-                      open the provenance popup. Disabled while its save is in flight or once the
-                      cell is already saved — the "saved" state is read back from Postgres, so it
-                      survives a reload. Also disabled until we can name the answer's city/category. */}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void savePick(f);
-                    }}
-                    disabled={!answerMeta || isSaving || isSaved}
-                    className={isSaved ? "wh-save wh-save-done" : "wh-save"}
-                  >
-                    {isSaved ? "✓ saved" : isSaving ? "saving…" : "save"}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-        )}
-
-        {/* The user's saved history. Like Top picks, no saves ⇒ no heading: an empty panel reads as
-            a failed load, an absent one reads as "nothing saved yet", which is the truth. This list
-            is Postgres-backed (listSavedSitesAction), so it survives a reload; today's market gap is
-            joined in from the compareSavedSites layer by coordinate. */}
-        {savedSites.length > 0 && (
-        <section>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-            <Label inline>Saved sites</Label>
-            <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 9, color: C.faint }}>
-              {savedSites.length}
-            </span>
-          </div>
-          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-            {savedSites.map((s) => {
-              const props = marketByCoord.get(`${s.lon.toFixed(5)},${s.lat.toFixed(5)}`);
-              const gap = props?.marketGap;
-              return (
-                <div key={s.id} className="wh-saved-row">
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: 12.5,
-                        fontWeight: 600,
-                        color: "#eef3f5",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {s.label}
-                    </div>
-                    <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
-                      {/* The saved score MAY be null — an unscored save renders "unscored", never 0. */}
-                      {s.score != null ? `${s.score} / 100` : "unscored"} · {s.status}
-                    </div>
-                  </div>
-                  {/* Today's market gap, from compareSavedSites. Absent until it runs, and absent —
-                      not 0 — for a site outside today's scored set, so a dash rather than a number. */}
-                  <div style={{ textAlign: "right", flex: "none" }}>
-                    <div
-                      style={{
-                        fontFamily: MONO,
-                        fontSize: 9,
-                        letterSpacing: ".08em",
-                        color: C.faint,
-                        textTransform: "uppercase",
-                      }}
-                    >
-                      today
-                    </div>
-                    <div style={{ fontFamily: MONO, fontSize: 13, color: gap != null ? C.accent : C.dim }}>
-                      {gap != null ? gap : "—"}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          {/* Ask the agent to run compareSavedSites: the answer is the saved rings landing on the
-              map and the "today" column above filling in. A chat message, not a direct tool call —
-              the agent owns the re-score against today's surface. */}
-          <button
-            onClick={() => {
-              if (busy) return;
-              setError(null);
-              sendMessage({ text: "How do my saved sites compare to the market?" });
-            }}
-            disabled={busy}
-            className="wh-compare"
-          >
-            Compare vs the market
-          </button>
-        </section>
-        )}
-
-        <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 9, paddingTop: 4 }}>
+        <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 9, paddingTop: 8 }}>
           <button
             onClick={replay}
             disabled={!store.current.competitors || replaying || busy}
@@ -1956,26 +2470,67 @@ function Toggle({
 }
 
 /**
- * The rail is an instrument floating over a full-bleed map, not a column beside it.
+ * The dashboard is a three-column grid over the map, not a rail floating on it.
  *
- * The brief asked us to choose between split and map-dominant: the map is the answer, so it gets
- * every pixel, and the rail overlays it. `backdrop-filter` is what makes that legible — the map
- * stays visibly present underneath rather than being occluded by a slab.
+ * The brief asked us to choose between split and map-dominant: the map still wins the centre and
+ * gets the "well" — a bordered, inset panel it fills edge to edge — while the run stack (left) and
+ * the answer/controls (right) frame it as a terminal. Every colour is a `C` palette token or a
+ * chrome grey; the pick yellow `C.win` is spent only on the #1 pick, never on this chrome.
  */
 const CSS = `
-.wh-rail{position:absolute;left:18px;top:18px;bottom:18px;width:344px;z-index:8;display:flex;
-  flex-direction:column;gap:14px;padding:16px 16px 18px;overflow-y:auto;border-radius:14px;
-  background:${C.panel};backdrop-filter:blur(14px);border:1px solid ${C.hair};
-  box-shadow:0 24px 60px -20px rgba(0,0,0,.7)}
-.wh-rail::-webkit-scrollbar{width:8px}
-.wh-rail::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}
-.wh-rail::-webkit-scrollbar-track{background:transparent}
-.wh-pill{position:absolute;top:20px;left:50%;transform:translateX(-50%);z-index:6;display:flex;
-  align-items:center;gap:9px;padding:7px 15px;border-radius:20px;background:rgba(13,15,18,.82);
-  backdrop-filter:blur(12px);border:1px solid ${C.hair};font-family:${MONO};font-size:12px;color:#cdd6dd}
+.wh-scroll::-webkit-scrollbar{width:7px;height:7px}
+.wh-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:4px}
+.wh-scroll::-webkit-scrollbar-track{background:transparent}
+.wh-topbar{grid-column:1 / 4;display:flex;align-items:center;gap:14px;padding:0 16px;
+  border-bottom:1px solid rgba(255,255,255,.07);background:rgba(9,11,14,.9)}
+.wh-scrub{display:flex;align-items:center;gap:2px;padding:3px;border-radius:9px;
+  background:rgba(255,255,255,.05);border:1px solid ${C.hair}}
+.wh-scrub-btn{width:24px;height:22px;display:flex;align-items:center;justify-content:center;
+  border-radius:6px;cursor:pointer;color:#b7c0c8;font-size:12px}
+.wh-scrub-btn:hover{background:rgba(255,255,255,.06)}
+.wh-topreset{width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+  border-radius:7px;cursor:pointer;color:#69737d;font-size:13px;border:1px solid ${C.hair}}
+.wh-topreset:hover{color:#b7c0c8;border-color:rgba(255,255,255,.16)}
+.wh-col-left{grid-row:2;border-right:1px solid rgba(255,255,255,.07);background:rgba(9,11,14,.72);
+  display:flex;flex-direction:column;min-height:0}
+.wh-col-head{padding:12px 14px 9px;display:flex;align-items:center;gap:8px;
+  border-bottom:1px solid rgba(255,255,255,.05)}
+.wh-runs{flex:1;min-height:0;overflow-y:auto;padding:10px 12px}
+.wh-composer{border-top:1px solid rgba(255,255,255,.07);padding:11px 12px;background:rgba(7,9,12,.6)}
+.wh-chip{padding:3px 8px;border-radius:20px;background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.09);font-size:10px;color:#9aa4ad;cursor:pointer}
+.wh-chip:hover{border-color:rgba(255,255,255,.16);color:#cdd6dd}
+.wh-spin{width:9px;height:9px;border:1.5px solid #f0d878;border-top-color:transparent;
+  border-radius:50%;animation:wh-run .7s linear infinite}
+.wh-col-center{grid-row:2;display:flex;flex-direction:column;min-width:0;overflow:hidden;
+  padding:12px;gap:12px;background:${C.bg}}
+.wh-kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;height:78px;flex:none;min-width:0}
+.wh-tile{padding:9px 12px;border-radius:10px;background:rgba(255,255,255,.02);
+  border:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;justify-content:center;
+  gap:4px;min-width:0;overflow:hidden}
+.wh-tile-label{font-family:${MONO};font-size:9px;letter-spacing:.1em;color:#6b7580;text-transform:uppercase}
+.wh-tile-val{display:flex;align-items:baseline;gap:4px}
+.wh-tile-num{font-family:${MONO};font-size:23px;font-weight:600;color:#eef3f5;line-height:1}
+.wh-tile-unit{font-size:10px;color:#7a848d}
+.wh-tile-absent{font-family:${MONO};font-size:10px;color:#4c5560}
+.wh-well{position:relative;flex:1;min-height:0;border-radius:14px;overflow:hidden;
+  border:1px solid rgba(255,255,255,.09);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.4),0 20px 50px -24px rgba(0,0,0,.8);background:#0a0e13}
+.wh-well-pill{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:6;display:flex;
+  align-items:center;gap:9px;padding:7px 15px;border-radius:20px;background:rgba(9,11,14,.86);
+  backdrop-filter:blur(12px);border:1px solid ${C.hair};font-family:${MONO};font-size:11.5px;color:#cdd6dd}
+.wh-caption{position:absolute;left:14px;bottom:14px;right:14px;max-width:560px;z-index:6;
+  padding:13px 15px;border-radius:12px;background:rgba(9,11,14,.85);backdrop-filter:blur(14px);
+  border:1px solid rgba(111,240,224,.18);box-shadow:0 18px 40px -20px rgba(0,0,0,.8)}
+.wh-legend{position:absolute;right:14px;top:14px;z-index:6;display:flex;flex-direction:column;gap:6px;
+  padding:9px 11px;border-radius:10px;background:rgba(9,11,14,.72);backdrop-filter:blur(10px);
+  border:1px solid ${C.hair};font-family:${MONO};font-size:9.5px}
+.wh-legend-row{display:flex;align-items:center;gap:7px}
+.wh-col-right{grid-row:2;border-left:1px solid rgba(255,255,255,.07);background:rgba(9,11,14,.72);
+  overflow-y:auto;padding:14px 14px 18px;display:flex;flex-direction:column;gap:16px;min-height:0}
 .wh-dot{width:7px;height:7px;border-radius:50%;background:${C.accent};animation:wh-pulse 1s infinite}
-.wh-pop{position:absolute;right:18px;top:18px;z-index:9;width:262px;padding:15px;border-radius:13px;
-  background:rgba(11,13,16,.9);backdrop-filter:blur(14px);box-shadow:0 24px 60px -20px rgba(0,0,0,.75)}
+.wh-pop{position:absolute;left:318px;top:150px;z-index:20;width:266px;padding:15px;border-radius:13px;
+  background:rgba(9,11,14,.94);backdrop-filter:blur(14px);box-shadow:0 24px 60px -20px rgba(0,0,0,.8)}
 .wh-ask{width:100%;padding:10px 40px 10px 12px;border-radius:9px;background:rgba(255,255,255,.05);
   border:1px solid rgba(255,255,255,.1);color:${C.text};font-family:${MONO};font-size:12.5px;outline:none}
 .wh-go{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:28px;height:28px;border:none;
@@ -2012,7 +2567,8 @@ input[type=range]:disabled{opacity:.5}
 @keyframes wh-pulse{0%,100%{opacity:.45}50%{opacity:1}}
 @keyframes wh-ring{0%{transform:scale(.6);opacity:.9}70%{opacity:0}100%{transform:scale(2.4);opacity:0}}
 @keyframes wh-caret{0%,100%{opacity:1}50%{opacity:0}}
+@keyframes wh-run{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){
-  .wh-marker,.wh-dot,.wh-ring,.wh-caret{animation:none!important;transition:none!important}
+  .wh-marker,.wh-dot,.wh-ring,.wh-caret,.wh-spin{animation:none!important;transition:none!important}
 }
 `;
