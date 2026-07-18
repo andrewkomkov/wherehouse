@@ -36,6 +36,11 @@ type LayerData = MapPart["data"];
 // full ~54-point monthly series reaches the client while the model only ever saw a two-field summary.
 type TrendPart = Extract<Msg["parts"][number], { type: "data-trend" }>;
 type TrendData = TrendPart["data"];
+// Feature 006: the agent's one-shot UI commands ride their own `data-ui` part. Each carries a
+// UNIQUE id (unlike the stable-id `data-map` layers), so the drain effect below applies each
+// exactly once via the SAME setters the buttons use — see `appliedUi` / `applyUiCommand`.
+type UiPart = Extract<Msg["parts"][number], { type: "data-ui" }>;
+type UiCommand = UiPart["data"];
 
 const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
@@ -145,6 +150,20 @@ const ENGINE_TAG: Record<string, { bg: string; col: string }> = {
   agent: { bg: "rgba(255,255,255,.06)", col: "#98a2ab" },
   ClickHouse: { bg: "rgba(111,240,224,.1)", col: "#9defdf" },
   Valhalla: { bg: "rgba(179,168,255,.12)", col: "#c2b8ff" },
+};
+
+/**
+ * Feature 006: the agent's UI tools, surfaced as real steps in a run's stack so the agentic trace
+ * stays honest — a 'hide the competitors' turn shows the setLayer tool call it actually made, not a
+ * silent nothing (acceptance 7). Keyed by the tool part type the stream emits.
+ */
+const UI_TOOL_LABELS: Record<string, string> = {
+  "tool-setLayer": "Toggle a layer",
+  "tool-reweight": "Re-weight the surface",
+  "tool-focusPick": "Open a pick",
+  "tool-highlightExtreme": "Mark the extreme cell",
+  "tool-reviewRun": "Rewind to a past run",
+  "tool-exportReport": "Export the PDF report",
 };
 
 /**
@@ -304,6 +323,55 @@ function withRevealOrder(fc: GeoJSON.FeatureCollection): GeoJSON.FeatureCollecti
   return fc;
 }
 
+/** Centroid of a feature's geometry — the point average of a hexagon's ring, or a Point as-is. */
+function centroidOf(g: GeoJSON.Geometry): [number, number] | null {
+  if (g.type === "Point") return g.coordinates as [number, number];
+  if (g.type === "Polygon") {
+    const ring = g.coordinates[0];
+    if (!ring?.length) return null;
+    let x = 0;
+    let y = 0;
+    for (const [lx, ly] of ring) {
+      x += lx;
+      y += ly;
+    }
+    return [x / ring.length, y / ring.length];
+  }
+  return null;
+}
+
+/**
+ * The worst/best SCORED cell on the opportunity surface (Feature 006, `highlightExtreme`).
+ *
+ * Computed from the FeatureCollection the client ALREADY holds — no new query, no invented cell.
+ * Each cell is scored the same way the choropleth is painted (`gapDisplay` under the current
+ * weights), so the marked cell is exactly the one the eye would pick out. A cell with no `gap` is
+ * unscored and skipped (absent != 0). Returns null when nothing is scoreable — the caller no-ops
+ * rather than mark a cell that does not exist.
+ */
+function extremeCell(
+  fc: GeoJSON.FeatureCollection | undefined,
+  scale: Scale | undefined,
+  weights: Weights,
+  which: "worst" | "best",
+): { lon: number; lat: number; score: number; kind: "worst" | "best" } | null {
+  if (!fc) return null;
+  let best: { lon: number; lat: number; score: number } | null = null;
+  for (const f of fc.features as GeoJSON.Feature<GeoJSON.Geometry, CellProps>[]) {
+    const p = f.properties;
+    if (!p || typeof p.gap !== "number") continue;
+    const score = scale ? gapDisplay(p, scale, weights) : p.gap;
+    if (
+      best === null ||
+      (which === "best" ? score > best.score : score < best.score)
+    ) {
+      const c = centroidOf(f.geometry);
+      if (c) best = { lon: c[0], lat: c[1], score };
+    }
+  }
+  return best ? { ...best, kind: which } : null;
+}
+
 // ---------------------------------------------------------------------------------------------
 
 function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
@@ -318,6 +386,11 @@ function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
       zoom: 9.7,
       attributionControl: false,
       dragRotate: false,
+      // Feature 006 / FR-EXPORT: without this the WebGL back buffer is cleared after each frame
+      // and `getCanvas().toDataURL()` reads back BLANK — the PDF's map snapshot would be empty.
+      // It keeps the drawing buffer around so the report can capture whatever is on screen. In
+      // maplibre-gl v5 this WebGL context attribute lives under `canvasContextAttributes`.
+      canvasContextAttributes: { preserveDrawingBuffer: true },
       style: {
         version: 8,
         glyphs: `${PM_ASSETS}/fonts/{fontstack}/{range}.pbf`,
@@ -446,6 +519,17 @@ export function Chat() {
     saved: true,
   });
   const [selected, setSelected] = useState<number | null>(null);
+  /**
+   * The worst/best cell the agent asked to mark (Feature 006, `highlightExtreme`). A REAL scored
+   * cell from the opportunity surface (see `extremeCell`), never an invented one — null when
+   * nothing is marked. Cleared whenever a new question is asked or the session is reset.
+   */
+  const [extreme, setExtreme] = useState<{
+    lon: number;
+    lat: number;
+    score: number;
+    kind: "worst" | "best";
+  } | null>(null);
   const [replaying, setReplaying] = useState(false);
   /**
    * Which past agent run the map is currently showing. `null` = the live/current data — the
@@ -498,6 +582,12 @@ export function Chat() {
   const store = useRef<Partial<Record<LayerId, GeoJSON.FeatureCollection>>>({});
   /** Signature of what is already painted, so a later layer landing does not refetch earlier ones. */
   const painted = useRef(new Map<LayerId, string>());
+  /**
+   * Feature 006: ids of `data-ui` commands already applied — the mirror of `painted` for the
+   * command channel. A UI command carries a unique id and must fire its setter exactly once; this
+   * set makes the drain effect idempotent across re-renders and reconnects.
+   */
+  const appliedUi = useRef(new Set<string>());
   /** Bumped to cancel in-flight tweens when a new answer or a replay starts. */
   const gen = useRef(0);
   /**
@@ -542,6 +632,20 @@ export function Chat() {
       return out;
     }
     return undefined;
+  }, [messages]);
+
+  /**
+   * Every `data-ui` command in the conversation, in order (Feature 006). Each carries a unique id
+   * the drain effect keys on so it applies exactly once. `p.id` is set server-side to a fresh UUID
+   * per command; the `m.id`-based fallback only guards the theoretical case of a missing part id.
+   */
+  const uiCommands = useMemo(() => {
+    const out: { id: string; data: UiCommand }[] = [];
+    for (const m of messages)
+      for (const p of m.parts)
+        if (p.type === "data-ui")
+          out.push({ id: (p as { id?: string }).id ?? `${m.id}:${out.length}`, data: p.data });
+    return out;
   }, [messages]);
 
   /** The p95 scalars this answer was scored with. Only the opportunity layer carries them. */
@@ -1073,9 +1177,17 @@ export function Chat() {
     return raw.map((r, i) => {
       const isLast = i === raw.length - 1;
       const live = isLast && busy;
-      // Honest classification: a run that produced the picks layer rebuilt the answer; one that
-      // produced any other layer but no picks steered it; one that produced no map at all is talk.
-      const kind: RunKind = r.map.has("picks") ? "rebuild" : r.map.size > 0 ? "steer" : "talk";
+      // Feature 006: the UI tools this turn actually called, in a stable order — surfaced as run
+      // steps so a 'hide the competitors' turn shows the tool call it made (acceptance 7).
+      const uiTools = Object.keys(UI_TOOL_LABELS).filter((t) => r.tools.has(t));
+      // Honest classification: a run that produced the picks layer REBUILT the answer; one that
+      // produced any other layer OR drove a UI tool STEERED it; one that did neither is talk. A UI
+      // command is never "talk" — it changed the instrument, which is exactly the point (FR).
+      const kind: RunKind = r.map.has("picks")
+        ? "rebuild"
+        : r.map.size > 0 || uiTools.length > 0
+          ? "steer"
+          : "talk";
       const steps: RunStep[] = [];
       for (const w of WAVES) {
         let present: boolean;
@@ -1087,13 +1199,26 @@ export function Chat() {
         const state: WaveState = live ? waveState(w) : "done";
         steps.push({ key: w.key, label: w.label, engine: w.source, state });
       }
+      // The UI tool steps, after the map waves. Their state comes straight from the tool part's
+      // own streamed state — never a timer — so a live command reads ◐ until it settles.
+      for (const t of uiTools) {
+        const st = r.tools.get(t) ?? "";
+        const state: WaveState = live
+          ? st === "output-available" || st === "output-error"
+            ? "done"
+            : "active"
+          : "done";
+        steps.push({ key: t, label: UI_TOOL_LABELS[t], engine: "agent", state });
+      }
       const comp = r.map.get("competitors")?.rowCount;
       const chip =
         comp !== undefined
           ? `${comp.toLocaleString("en")} competitors`
           : r.map.size > 0
             ? "map updated"
-            : "reply";
+            : uiTools.length > 0
+              ? "UI updated"
+              : "reply";
       return { id: r.id, q: r.q, kind, steps, chip, live, hasLayers: r.map.size > 0 };
     });
     // waveState/caption/latest all move with `messages`+`busy`; `signature` covers layer changes.
@@ -1172,6 +1297,9 @@ export function Chat() {
       setError(null);
       setSelected(null);
       setSelectedRunId(null);
+      // A new question rebuilds the surface, so any marked worst/best cell from the previous
+      // answer no longer refers to anything on screen — drop it.
+      setExtreme(null);
       sentThisSession.current = true;
       store.current = {};
       painted.current.clear();
@@ -1188,8 +1316,10 @@ export function Chat() {
     store.current = {};
     painted.current.clear();
     runSnapshots.current.clear();
+    appliedUi.current.clear();
     setSelected(null);
     setSelectedRunId(null);
+    setExtreme(null);
     setError(null);
     setResumed(false);
     setMessages([]);
@@ -1209,6 +1339,300 @@ export function Chat() {
     }
     bumpStore();
   }, [setMessages]);
+
+  // ---- Feature 006: the report + the UI command channel ---------------------------------
+
+  /**
+   * FR-EXPORT — a one-page A4 PDF of the current answer, built ENTIRELY client-side (the app is a
+   * static export served from ClickHouse; there is no server render). Deterministic jsPDF text/
+   * rects/image, no html2canvas. Every honesty invariant carries over: absent data is omitted
+   * (never a 0), the editorial tag stays on affinity, the caption is the agent's own streamed text,
+   * and #FAFF69 is spent only on the #1 pick's badge. Filename `wherehouse-<city>-<trade>.pdf`.
+   */
+  const generateReport = useCallback(async () => {
+    const m = map.current;
+    if (!m) {
+      setError("report: map not ready");
+      return;
+    }
+    const meta = answerMeta;
+    const city = meta?.city ?? "city";
+    const trade = meta?.category ?? "site";
+    const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+    // The siting question behind the answer on screen — the last REBUILD run's text, never the
+    // "export a report" command that triggered this. Falls back to a plainly stated question.
+    const rebuildRun = [...runs].reverse().find((r) => r.kind === "rebuild");
+    const question = rebuildRun?.q?.trim() || `Where to open a ${trade} in ${cap(city)}?`;
+    const dateStr = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+
+    // Capture the map exactly as it is on screen. preserveDrawingBuffer (see useMapInstance) is
+    // what makes this non-empty; a cross-origin-tainted canvas would throw, in which case the
+    // report is still produced without the snapshot rather than failing outright.
+    let mapImg: string | null = null;
+    let ratio = 0.62;
+    try {
+      const cvs = m.getCanvas();
+      mapImg = cvs.toDataURL("image/png");
+      ratio = cvs.height / cvs.width;
+    } catch (err) {
+      mapImg = null;
+      setError(`report: map snapshot unavailable (${(err as Error).message})`);
+    }
+
+    const { jsPDF } = await import("jspdf");
+    const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const W = 210;
+    const M = 14;
+    const cw = W - 2 * M;
+    const INK: [number, number, number] = [26, 32, 40];
+    const MUTED: [number, number, number] = [110, 120, 130];
+    const HAIR: [number, number, number] = [223, 227, 232];
+    const TEAL: [number, number, number] = [21, 140, 140];
+    const WIN: [number, number, number] = [250, 255, 105]; // #FAFF69 — the #1 pick ONLY
+    const fill = (c: [number, number, number]) => doc.setFillColor(c[0], c[1], c[2]);
+    const ink = (c: [number, number, number]) => doc.setTextColor(c[0], c[1], c[2]);
+    const draw = (c: [number, number, number]) => doc.setDrawColor(c[0], c[1], c[2]);
+    const lines = (t: string, w: number) => doc.splitTextToSize(t, w) as string[];
+    let y = M;
+
+    const sectionLabel = (t: string) => {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      ink(MUTED);
+      doc.text(t.toUpperCase(), M, y);
+      y += 5;
+    };
+    const hair = () => {
+      draw(HAIR);
+      doc.setLineWidth(0.3);
+      doc.line(M, y, W - M, y);
+    };
+
+    // header
+    fill(WIN);
+    doc.roundedRect(M, y, 6, 6, 1.2, 1.2, "F");
+    fill(INK);
+    doc.circle(M + 3, y + 3, 1.1, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(15);
+    ink(INK);
+    doc.text("WhereHouse", M + 9, y + 4.4);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    ink(MUTED);
+    doc.text("SITE SELECTION TERMINAL", M + 9, y + 8.4);
+    doc.text(dateStr, W - M, y + 4.4, { align: "right" });
+    y += 12;
+    hair();
+    y += 7;
+
+    // question + city/trade
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    ink(INK);
+    const qLines = lines(question, cw);
+    doc.text(qLines, M, y);
+    y += qLines.length * 6 + 1.5;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    ink(TEAL);
+    doc.text(`${cap(trade)} · ${cap(city)}`, M, y);
+    y += 6;
+
+    // map snapshot
+    if (mapImg) {
+      let ih = cw * ratio;
+      if (ih > 86) ih = 86;
+      const iw = ih / ratio;
+      const ix = M + (cw - iw) / 2;
+      doc.addImage(mapImg, "PNG", ix, y, iw, ih);
+      draw(HAIR);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(ix, y, iw, ih, 1.5, 1.5, "S");
+      y += ih + 6;
+    }
+
+    // caption — the agent's own streamed text, never authored here
+    if (caption.trim()) {
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(9.5);
+      ink(INK);
+      const cLines = lines(caption.trim(), cw);
+      doc.text(cLines, M, y);
+      y += cLines.length * 4.6 + 4;
+    }
+
+    // top picks
+    if (picks.length) {
+      sectionLabel("Top picks");
+      const ordered = [...picks].sort((a, b) => a.properties.rank - b.properties.rank);
+      for (const f of ordered) {
+        const p = f.properties;
+        const top = p.rank === 1;
+        const score = scale ? gapDisplay(p as CellProps, scale, weights) : p.gap;
+        fill(top ? WIN : [238, 240, 243]);
+        doc.roundedRect(M, y - 3.6, 5.6, 5.6, 1, 1, "F");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9);
+        ink(INK);
+        doc.text(String(p.rank), M + 2.8, y + 0.5, { align: "center" });
+        // name — absent resolves to "Candidate site", never a guessed district
+        doc.setFontSize(11);
+        doc.text(p.place ?? "Candidate site", M + 8.5, y);
+        ink(top ? INK : TEAL);
+        doc.text(`${score} / 100`, W - M, y, { align: "right" });
+        y += 4.6;
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8.5);
+        ink(MUTED);
+        doc.text(`~${Number(p.pop).toLocaleString("en")} residents · ${p.sup} rivals nearby`, M + 8.5, y);
+        y += 4.4;
+        // editorial neighbours — labelled editorial, present only when the pick has them
+        if (p.topNeighbours && p.topNeighbours.length > 0) {
+          const nb = p.topNeighbours
+            .slice(0, 3)
+            .map((n) => n.category.replace(/_/g, " "))
+            .join(" · ");
+          doc.setFontSize(8);
+          ink(MUTED);
+          doc.text(`editorial · ${nb} nearby`, M + 8.5, y);
+          y += 4.2;
+        }
+        y += 1.4;
+      }
+      y += 2;
+    }
+
+    // market at a glance — each datum omitted when absent, never rendered as 0
+    const glance: string[] = [];
+    if (competitorCount !== undefined) glance.push(`Competitors: ${competitorCount.toLocaleString("en")}`);
+    if (medianOpportunity !== undefined) glance.push(`Median opportunity: ${Math.round(medianOpportunity)} / 100`);
+    if (trend) {
+      const pct = trend.pctChange != null ? ` ${trend.pctChange >= 0 ? "+" : ""}${trend.pctChange}%` : "";
+      glance.push(`Momentum: ${trend.direction}${pct} · since '${String(trend.fromYear).slice(-2)}`);
+    }
+    if (glance.length) {
+      sectionLabel("Market at a glance");
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9.5);
+      ink(INK);
+      for (const g of glance) {
+        doc.text(g, M, y);
+        y += 5;
+      }
+      y += 2;
+    }
+
+    // provenance / honesty
+    sectionLabel("Provenance & honesty");
+    const prov = (color: [number, number, number], text: string) => {
+      fill(color);
+      doc.circle(M + 1.2, y - 1.1, 1.1, "F");
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      ink(INK);
+      const pl = lines(text, cw - 6);
+      doc.text(pl, M + 5, y);
+      y += pl.length * 4.2 + 1.4;
+    };
+    prov(TEAL, "Measured — competitors (Overture); where drawn, the 10-minute walk catchment (Valhalla).");
+    prov([154, 140, 255], "Estimated — residents (Kontur population, Nov 2023).");
+    prov([138, 148, 158], "Editorial — neighbourhood affinity, a hand-authored heuristic; not measured and not part of the score.");
+    if (notMeasured !== undefined && notMeasured > 0) {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      ink(MUTED);
+      const nm = lines(
+        `${notMeasured.toLocaleString("en")} cells were not measured for accessibility — shown faint, never counted as zero.`,
+        cw - 6,
+      );
+      doc.text(nm, M + 5, y);
+      y += nm.length * 4.2 + 1.4;
+    }
+    y += 1.5;
+    hair();
+    y += 5;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    ink(MUTED);
+    doc.text(
+      lines(
+        "Population © Kontur (CC BY). Places © Overture Maps. Routing © Valhalla on OpenStreetMap. Basemap © OpenStreetMap contributors, Protomaps.",
+        cw,
+      ),
+      M,
+      y,
+    );
+
+    const fname =
+      `wherehouse-${city}-${trade}`
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "") || "wherehouse-report";
+    doc.save(`${fname}.pdf`);
+  }, [map, answerMeta, runs, picks, competitorCount, medianOpportunity, trend, notMeasured, caption, scale, weights]);
+
+  /**
+   * Apply one `data-ui` command by calling the SAME setter the corresponding button uses — so an
+   * agent-driven action and a hand-driven one can never diverge (the mechanism the spec insists on).
+   * The model never sees any of this; it only got `{ ok: true, action }` back.
+   */
+  const applyUiCommand = useCallback(
+    (cmd: UiCommand) => {
+      switch (cmd.action) {
+        case "setLayer":
+          setVisible((v) => ({ ...v, [cmd.layer]: cmd.on }));
+          break;
+        case "reweight":
+          // Only the three real factors — residents, competition (=lowCompetition), accessibility.
+          // There is NO rent factor; anything else the model sent was already dropped server-side.
+          setWeights((w) => ({
+            ...w,
+            ...(cmd.residents != null ? { residents: Math.max(0, Math.min(100, cmd.residents)) } : {}),
+            ...(cmd.competition != null ? { lowCompetition: Math.max(0, Math.min(100, cmd.competition)) } : {}),
+            ...(cmd.accessibility != null ? { accessibility: Math.max(0, Math.min(100, cmd.accessibility)) } : {}),
+          }));
+          break;
+        case "focusPick":
+          setSelected(cmd.rank);
+          break;
+        case "highlightExtreme": {
+          // Compute the REAL worst/best scored cell from the surface we already hold — no query,
+          // no invention. Nothing scoreable ⇒ no-op (never mark a cell that does not exist).
+          const cell = extremeCell(store.current.opportunity, scale, weights, cmd.extreme);
+          if (cell) {
+            setExtreme(cell);
+            const m = map.current;
+            if (m) m.flyTo({ center: [cell.lon, cell.lat], zoom: Math.max(m.getZoom(), 12.5), duration: 700 });
+          }
+          break;
+        }
+        case "reviewRun": {
+          const idx = Math.max(1, Math.min(runs.length, cmd.n)) - 1;
+          const run = runs[idx];
+          if (run) setSelectedRunId(run.id);
+          break;
+        }
+        case "exportReport":
+          void generateReport();
+          break;
+      }
+    },
+    [scale, weights, runs, generateReport, map],
+  );
+
+  /**
+   * Drain un-applied `data-ui` commands — the mirror of the paint effect for the command channel.
+   * `appliedUi` (unique-id set) makes each command fire its setter exactly once, even as this
+   * effect re-runs on re-render, reconnect, or a weights change.
+   */
+  useEffect(() => {
+    for (const cmd of uiCommands) {
+      if (appliedUi.current.has(cmd.id)) continue;
+      appliedUi.current.add(cmd.id);
+      applyUiCommand(cmd.data);
+    }
+  }, [uiCommands, applyUiCommand]);
 
   const liveText = busy ? "assembling" : "ready";
   const lastRun = runs.length ? runs[runs.length - 1] : null;
@@ -1623,6 +2047,10 @@ export function Chat() {
           <div ref={container} style={{ position: "absolute", inset: 0 }} />
 
           <PickMarkers map={map} ready={ready} picks={displayPicks} visible={visible.picks} onSelect={setSelected} />
+
+          {/* Feature 006: the worst/best cell the agent marked (highlightExtreme). A REAL scored
+              cell from the surface, annotated with its own computed score — never an invented one. */}
+          <ExtremeMarker map={map} ready={ready} cell={extreme} onClear={() => setExtreme(null)} />
 
           {/* Transient status, top-centre of the well. The only indeterminate indicator, gone the
               moment there is something real to look at. */}
@@ -2232,6 +2660,53 @@ function PickMarkers({
 }
 
 /**
+ * The worst/best cell the agent marked (Feature 006, `highlightExtreme`), as a single DOM marker.
+ *
+ * It is an ANNOTATION, not a recommendation: a neutral chrome ring plus a pill stating what was
+ * computed — "WORST · 12/100" / "BEST · 88/100" — over a REAL scored cell the client found in the
+ * surface it already holds. It never wears the pick yellow (`C.win`, spent once on the #1 pick).
+ * Click the pill to dismiss.
+ */
+function ExtremeMarker({
+  map,
+  ready,
+  cell,
+  onClear,
+}: {
+  map: React.RefObject<maplibregl.Map | null>;
+  ready: boolean;
+  cell: { lon: number; lat: number; score: number; kind: "worst" | "best" } | null;
+  onClear: () => void;
+}) {
+  const marker = useRef<maplibregl.Marker | null>(null);
+
+  useEffect(() => {
+    const m = map.current;
+    if (!ready || !m) return;
+    marker.current?.remove();
+    marker.current = null;
+    if (!cell) return;
+
+    const el = document.createElement("div");
+    el.className = "wh-extreme";
+    const tag = `${cell.kind === "worst" ? "WORST" : "BEST"} · ${Math.round(cell.score)}/100`;
+    el.innerHTML = `<div class="wh-extreme-ring"></div><div class="wh-extreme-tag">${tag}</div>`;
+    el.onclick = () => onClear();
+
+    marker.current = new maplibregl.Marker({ element: el, anchor: "center" })
+      .setLngLat([cell.lon, cell.lat])
+      .addTo(m);
+
+    return () => {
+      marker.current?.remove();
+      marker.current = null;
+    };
+  }, [map, ready, cell, onClear]);
+
+  return null;
+}
+
+/**
  * "How do you know that?" — answered by the interface rather than by us talking over the demo.
  *
  * The measured/estimated split is the point. Every row here is a number a sceptic can recompute
@@ -2669,14 +3144,22 @@ input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;bac
 input[type=range]:disabled{opacity:.5}
 .maplibregl-ctrl-attrib,.maplibregl-ctrl-logo{display:none!important}
 .wh-marker{cursor:pointer;transition:transform .5s cubic-bezier(.22,1,.36,1),opacity .35s ease}
+.wh-extreme{position:relative;display:flex;flex-direction:column;align-items:center;cursor:pointer}
+.wh-extreme-ring{width:20px;height:20px;border-radius:50%;border:2px dashed rgba(231,236,240,.92);
+  box-shadow:0 0 0 4px rgba(9,11,14,.5),0 2px 8px -2px rgba(0,0,0,.7);animation:wh-extreme-pulse 1.9s ease-out infinite}
+.wh-extreme-tag{margin-top:4px;white-space:nowrap;font-family:${MONO};font-size:9.5px;font-weight:600;
+  letter-spacing:.05em;color:#e7ecf0;background:rgba(9,11,14,.9);border:1px solid ${C.hair};
+  padding:2px 7px;border-radius:20px;backdrop-filter:blur(8px)}
 .wh-ring{position:absolute;inset:-2px;border-radius:50%;border:2px solid ${C.win};
   animation:wh-ring 1.8s ease-out infinite}
 .wh-caret{display:inline-block;width:7px;color:${C.accent};animation:wh-caret 1s step-end infinite}
 @keyframes wh-pulse{0%,100%{opacity:.45}50%{opacity:1}}
 @keyframes wh-ring{0%{transform:scale(.6);opacity:.9}70%{opacity:0}100%{transform:scale(2.4);opacity:0}}
+@keyframes wh-extreme-pulse{0%,100%{box-shadow:0 0 0 3px rgba(9,11,14,.5),0 0 0 5px rgba(231,236,240,.25)}
+  50%{box-shadow:0 0 0 3px rgba(9,11,14,.5),0 0 0 9px rgba(231,236,240,0)}}
 @keyframes wh-caret{0%,100%{opacity:1}50%{opacity:0}}
 @keyframes wh-run{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){
-  .wh-marker,.wh-dot,.wh-ring,.wh-caret,.wh-spin{animation:none!important;transition:none!important}
+  .wh-marker,.wh-dot,.wh-ring,.wh-caret,.wh-spin,.wh-extreme-ring{animation:none!important;transition:none!important}
 }
 `;

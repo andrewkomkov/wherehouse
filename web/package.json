@@ -17,6 +17,7 @@
     "@protomaps/basemaps": "^5.7.2",
     "@trigger.dev/sdk": "^4.5.2",
     "ai": "^5",
+    "jspdf": "^4.2.1",
     "maplibre-gl": "^5",
     "next": "^15",
     "pg": "^8.22.0",

@@ -4,7 +4,7 @@ import { streamText, stepCountIs, tool } from "ai";
 import type { InferUITools, UIMessage } from "ai";
 import { createClient } from "@clickhouse/client";
 import { z } from "zod";
-import { emitLayer, type MapData, type BBox } from "./layers";
+import { emitLayer, type MapData, type BBox, type LayerId } from "./layers";
 import { upsertShortlist, insertSavedSite } from "../lib/pg";
 import {
   CITIES,
@@ -58,11 +58,30 @@ type TrendData = {
   monthly: { month: string; count: number }[];
 };
 
+/**
+ * A one-shot UI command (Feature 006): the agent driving the browser's own UI state through the
+ * same setters the buttons use. Unlike `data-map` (a stateful layer updated in place by a STABLE
+ * id), each `data-ui` command carries a UNIQUE id — the client keeps an `appliedUi` set so a
+ * command applies exactly once, even across re-renders and reconnects (ADR-001 discipline).
+ *
+ * The model only ever sees `{ ok: true, action }` back; the full effect happens client-side and
+ * never re-enters the model context (same bypass as `data-map`). `reweight` names only the three
+ * REAL factors — residents, competition, accessibility — because those are the only ones there is
+ * data for; there is no "rent" factor and one must never be invented (see components/score.ts).
+ */
+export type UiCommand =
+  | { action: "setLayer"; layer: LayerId; on: boolean }
+  | { action: "reweight"; residents?: number; competition?: number; accessibility?: number }
+  | { action: "focusPick"; rank: number }
+  | { action: "highlightExtreme"; extreme: "worst" | "best" }
+  | { action: "reviewRun"; n: number }
+  | { action: "exportReport" };
+
 // NB: do NOT write `UIDataTypes & { map: MapData }` as the docs example does.
 // UIDataTypes is Record<string, unknown>, so intersecting widens keyof to
 // `string` — the part type degrades to `data-${string}` with `data: unknown`
 // and the client loses all narrowing. Declare the parts bare instead.
-type WhereHouseDataTypes = { map: MapData; trend: TrendData };
+type WhereHouseDataTypes = { map: MapData; trend: TrendData; ui: UiCommand };
 
 /**
  * The demo questions ask for trades, not for Overture taxonomy strings. This maps one to the
@@ -570,7 +589,98 @@ const categoryTrend = tool({
   },
 });
 
-const tools = { findCompetitors, scoreArea, rankSites, showCatchment, saveSite, compareSavedSites, categoryTrend };
+// -------------------------------------------------------------------------------------------
+// Feature 006 — the agent operates the whole UI. Each tool below emits a one-shot `data-ui`
+// command that the client applies through the SAME setter its buttons use, so agent-driven and
+// hand-driven paths can never diverge. The model only ever gets `{ ok: true, action }` back.
+// -------------------------------------------------------------------------------------------
+
+/**
+ * Write one `data-ui` command to the stream and return what the MODEL is allowed to see.
+ *
+ * The id is UNIQUE per command (unlike `data-map`'s stable layer id): a UI command is one-shot,
+ * so a fresh id lets the client apply it exactly once and never "update it in place". The effect
+ * lands entirely in the browser — the model just learns the action was issued.
+ */
+function emitUi(data: UiCommand): { ok: true; action: string } {
+  chat.response.write({ type: "data-ui", id: crypto.randomUUID(), data });
+  return { ok: true, action: data.action };
+}
+
+const clamp01to100 = (v: number): number => Math.max(0, Math.min(100, v));
+
+const setLayer = tool({
+  description:
+    "Show or hide one map layer. Use when the user asks to hide/show/toggle a layer — e.g. 'hide the competitors', 'show the walk catchment again'. Layers: opportunity (the choropleth), competitors, picks, catchment (the 10-min walk), saved.",
+  inputSchema: z.object({
+    layer: z.enum(["opportunity", "competitors", "picks", "catchment", "saved"]),
+    on: z.boolean().describe("true to show the layer, false to hide it"),
+  }),
+  execute: async ({ layer, on }) => emitUi({ action: "setLayer", layer, on }),
+});
+
+const reweight = tool({
+  description:
+    "Move the re-weight sliders that recolour the opportunity surface. There are ONLY three factors and each is 0–100: residents (Kontur population), competition (headroom vs rivals), accessibility (residents within a 10-min walk — 'walkability'). There is NO rent factor; never accept or invent one. Pass only the sliders the user asked to change. Use for 'weight walkability to the max', 'care more about residents', etc.",
+  inputSchema: z.object({
+    residents: z.number().optional().describe("0–100, Kontur resident demand"),
+    competition: z.number().optional().describe("0–100, low-competition headroom"),
+    accessibility: z.number().optional().describe("0–100, 10-min-walk accessibility"),
+  }),
+  execute: async ({ residents, competition, accessibility }) =>
+    emitUi({
+      action: "reweight",
+      // Clamp defensively so an out-of-range value from the model can never send a slider past
+      // its rail. Undefined stays undefined — an untouched factor is left where the user had it.
+      ...(residents != null ? { residents: clamp01to100(residents) } : {}),
+      ...(competition != null ? { competition: clamp01to100(competition) } : {}),
+      ...(accessibility != null ? { accessibility: clamp01to100(accessibility) } : {}),
+    }),
+});
+
+const focusPick = tool({
+  description:
+    "Open a ranked pick's provenance panel by rank (1 = best, then 2, then 3). Use when the user asks to open/see/focus a specific pick — e.g. 'open the #2 pick', 'show me the details of the top pick'.",
+  inputSchema: z.object({ rank: z.number().int().min(1).max(3) }),
+  execute: async ({ rank }) => emitUi({ action: "focusPick", rank }),
+});
+
+const highlightExtreme = tool({
+  description:
+    "Mark the single worst (lowest-opportunity) or best (highest-opportunity) SCORED cell on the current opportunity surface. The client finds it from the surface it already holds — no new query, no invented cell. Use for 'show me the worst place', 'where is the best cell'.",
+  inputSchema: z.object({ extreme: z.enum(["worst", "best"]) }),
+  execute: async ({ extreme }) => emitUi({ action: "highlightExtreme", extreme }),
+});
+
+const reviewRun = tool({
+  description:
+    "Rewind the map to a past agent run by its number (1 = the first run of this conversation). Use when the user asks to go back to an earlier answer — e.g. 'go back to the bakery answer', 'show me the first result again'.",
+  inputSchema: z.object({ n: z.number().int().min(1).describe("the run number, 1-based") }),
+  execute: async ({ n }) => emitUi({ action: "reviewRun", n }),
+});
+
+const exportReport = tool({
+  description:
+    "Build and download a one-page PDF report of the current answer — the map as shown, the top picks, the market-at-a-glance metrics and the provenance/honesty block. Use when the user asks to export, download, save or share a report or PDF.",
+  inputSchema: z.object({}),
+  execute: async () => emitUi({ action: "exportReport" }),
+});
+
+const tools = {
+  findCompetitors,
+  scoreArea,
+  rankSites,
+  showCatchment,
+  saveSite,
+  compareSavedSites,
+  categoryTrend,
+  setLayer,
+  reweight,
+  focusPick,
+  highlightExtreme,
+  reviewRun,
+  exportReport,
+};
 
 /**
  * The system prompt, exported so the naming guard can be EXECUTED against a live model rather
@@ -582,6 +692,13 @@ const tools = { findCompetitors, scoreArea, rankSites, showCatchment, saveSite, 
 export const SYSTEM_PROMPT = [
   "You are WhereHouse, a site-selection assistant. The map is the answer; your prose is not.",
   "For 'where should I open X in Y', call findCompetitors, then scoreArea, then rankSites, then showCatchment — in that order, so the map builds up as you work.",
+  // Feature 006 — ACT, DON'T TALK. A request to change what is on screen is a TOOL CALL, not a
+  // sentence: answering it with prose alone is the exact defect this feature fixes. Every such
+  // request has a tool, and a UI or rebuild request must NEVER resolve as a pure-text turn.
+  "When the user asks to change what is on screen, DO IT with a tool — never answer such a request with prose alone. A request to change the view or the answer must never be a text-only reply.",
+  "A new trade or a new city is a full REBUILD: call findCompetitors, then scoreArea, then rankSites, then showCatchment for the new (city, trade). 'what about kindergartens?', 'show me pharmacies instead', 'and in Amsterdam?' are rebuilds, not remarks.",
+  "For a request about the CURRENT view, call the matching UI tool: 'hide/show the competitors (or any layer)' -> setLayer; 'weight walkability/residents/competition higher or to the max' -> reweight (only those three factors — there is NO rent); 'show me the worst/best place' -> highlightExtreme; 'open pick 2' or 'show the #1 pick' -> focusPick; 'go back to the bakery answer' or an earlier run -> reviewRun; 'export/download/share a report or PDF' -> exportReport.",
+  "After acting you MAY add at most ONE short caption sentence — never instead of acting, only after. If a request would change the screen and you only wrote text, you failed it.",
   "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",
   // ⚠️ THE CAPTION'S JOB, AND WHY THIS IS SO INSISTENT.
   //
