@@ -140,8 +140,17 @@ print(json.dumps({
    "authentication": "basic",
    "credentials": {"username": "${POSTGRES_USER:-postgres}", "password": "${POSTGRES_PASSWORD}"},
    "caCertificate": ca,
+   # allowNullableColumns: true so a Postgres NULL (e.g. saved_sites.score before it's
+   # scored) lands as ClickHouse NULL, not 0 — "absent != 0" is a hard project invariant.
+   # Found 2026-07-18: the pipe that was actually running had this false (the API default),
+   # so its `score` column collapsed NULL -> 0.0. It is NOT PATCH-able on a running pipe —
+   # PATCH /clickpipes/{id} with a changed allowNullableColumns echoes back the OLD value
+   # unchanged (verified live; same "accepted but ignored" shape as Postgres PATCH `size`).
+   # Fixing the *live* pipe for real means recreating it; harmless today only because the
+   # app's one save path (web/src/components/chat.tsx savePick) always sends a real
+   # numeric score, never null. See db/clickhouse/010_oltp_grants.sql for the full note.
    "settings": {"replicationMode": "cdc", "publicationName": "wherehouse_pub",
-                "syncIntervalSeconds": 10},
+                "syncIntervalSeconds": 10, "allowNullableColumns": true},
    "tableMappings": [
      {"sourceSchemaName": "public", "sourceTable": "shortlists",
       "targetTable": "pg_shortlists", "tableEngine": "ReplacingMergeTree"},
