@@ -1,5 +1,10 @@
 # Design brief — WhereHouse
 
+> **There is a round 2: [`BRIEF-2.md`](./BRIEF-2.md).** Read this brief first (it still
+> stands in full), then round 2 — it covers the dashboard the map now lives inside, the
+> historical-momentum chart, and the multi-turn conversation, all of which shipped after
+> this was written.
+
 **Read this first.** Then [ADR-001](../architecture/progressive-map.md), which describes
 the one interaction everything else serves.
 
