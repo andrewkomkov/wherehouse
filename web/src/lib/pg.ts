@@ -15,8 +15,13 @@
  * The managed Postgres presents a private CA; `sslmode=require` alone does NOT verify it
  * (constitution: verified against the live service — `verify-full` is what psql needs, and
  * node-postgres is the same). We pass the CA explicitly and keep `rejectUnauthorized: true`,
- * so a MITM or a wrong host fails closed rather than connecting silently. The CA lives at
- * `.secrets/pg-ca.crt` (gitignored) — never printed, never committed.
+ * so a MITM or a wrong host fails closed rather than connecting silently. Locally the CA
+ * comes from `.secrets/pg-ca.crt` (gitignored). A Trigger.dev deployed worker has no
+ * filesystem access to that file (it isn't part of the deploy bundle, and `trigger deploy`
+ * only ships what's statically imported) — there `POSTGRES_CA_CERT` (the same PEM, set as a
+ * Trigger prod env var) is used instead. Discovered day 5: this read used to be eager and
+ * unconditional at module load, so *every* chat message — not just saveSite — would have
+ * crashed the deployed task at import time with no CA available.
  */
 
 import { Pool } from "pg";
@@ -31,10 +36,14 @@ import type { SavedSiteRow } from "./types";
 export type { SavedSiteRow };
 
 // Both `next dev` and `trigger dev` run with cwd = web/, so the repo-root `.secrets` is one
-// level up; the second path covers a run from the repo root itself. A deploy has no checked-in
-// cert and must supply the CA another way (env-mounted file / secret) — provisioning concern,
-// not this module's.
+// level up; the second path covers a run from the repo root itself. A deployed Trigger.dev
+// worker has neither cwd — it supplies the same PEM via `POSTGRES_CA_CERT` instead (set from
+// `.secrets/pg-ca.crt` by `infra/deploy-trigger.sh`), checked first so local dev's file stays
+// the fallback rather than something that has to be kept in sync.
 function readCa(): string {
+  const fromEnv = process.env.POSTGRES_CA_CERT;
+  if (fromEnv) return fromEnv;
+
   const candidates = [
     resolve(process.cwd(), "..", ".secrets", "pg-ca.crt"),
     resolve(process.cwd(), ".secrets", "pg-ca.crt"),

@@ -73,6 +73,32 @@ else
 fi
 
 echo
+echo "── Trigger.dev (prod deployment — infra/deploy-trigger.sh) ──"
+# The deployed task itself isn't queryable read-only over the REST API with a plain PAT
+# (the envvars-list and deployments-list endpoints both 401 a personal access token that
+# the import/prod-key endpoints happily accept — verified, not assumed; asymmetry left
+# undiagnosed since deploy-trigger.sh doesn't need those endpoints). So this reports what
+# CAN be checked read-only: local CLI auth, whether .env holds a prod key, and a live probe
+# of the one thing that actually proves the wiring — the deployed Worker minting a token.
+if command -v pnpm >/dev/null 2>&1 && (cd "$ROOT/web" && pnpm exec trigger whoami >/dev/null 2>&1); then
+    echo "  trigger CLI: authenticated"
+else
+    echo "  trigger CLI: not authenticated locally ('cd web && pnpm exec trigger login')"
+fi
+if [[ -n "${TRIGGER_SECRET_KEY_PROD:-}" ]]; then
+    echo "  TRIGGER_SECRET_KEY_PROD: set (${TRIGGER_SECRET_KEY_PROD:0:12}…) — the Worker should hold this, not the tr_dev_ key"
+else
+    echo "  TRIGGER_SECRET_KEY_PROD: unset in .env — run ./infra/deploy-trigger.sh"
+fi
+resp="$(curl -sS --max-time 15 -X POST https://app.slim-shaggy.com/api/token \
+    -H 'content-type: application/json' -d '{"chatId":"status-check"}' 2>/dev/null || echo '')"
+if grep -q '"token"' <<<"$resp"; then
+    echo "  POST /api/token: mints OK (does not by itself prove it's the prod key — see docs/PLAN.md)"
+else
+    echo "  POST /api/token: FAILED — $resp"
+fi
+
+echo
 echo "── App (ADR-003 'for real' — infra/app-worker) ──────────"
 # Cloudflare side, not the ClickHouse Cloud API — a live GET, not a config check, because
 # the config can look fine while the bundle in web.assets is stale or the Worker is wedged.

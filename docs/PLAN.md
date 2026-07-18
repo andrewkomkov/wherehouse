@@ -298,6 +298,28 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
   Postgres save/list — the latter needed Hyperdrive, not raw Workers TCP sockets, because
   Cloudflare's socket TLS can't validate our Postgres's private CA). Rebuild/redeploy:
   `./infra/deploy-app.sh`. See ADR-003's 2026-07-18 update for the detail.
+- **Trigger.dev prod deployment — DONE, verified live 2026-07-18.** Before this, chat only
+  worked while someone's laptop ran `pnpm exec trigger dev` — the Worker minted tokens
+  against a `tr_dev_…` key, so the live site was dead the moment that process stopped.
+  `./infra/deploy-trigger.sh` ships `wherehouse-chat` to Trigger's managed prod env and
+  rewires the Worker to a `tr_prod_…` key (fetched via the API, not typed in — see
+  `TRIGGER_SECRET_KEY_PROD` in `.env`/`.env.example` and the Trigger.dev section of
+  `CLAUDE.md` for the two things this had to discover: `trigger deploy` executes
+  `process.env` reads at *import* time in a remote build container, which surfaced an
+  eager, unconditional Postgres-CA file read in `lib/pg.ts` that would have crashed every
+  chat message in prod, not just `saveSite`; and neither env-var import nor the prod-key
+  fetch accept a `mint-token`-issued token, only the CLI's own stored PAT).
+  **Verified**: killed the local `trigger dev` process, started a fresh chat session
+  through the live Worker, and drove the actual session wire protocol
+  (`realtime/v1/sessions/{id}/in/append` + SSE `.../out`, the same one
+  `useTriggerChatTransport` uses) with "where should I open a bakery in Berlin?" — the
+  run executed on the deployed version, called all five tools (`findCompetitors`,
+  `scoreArea`, `rankSites`, `showCatchment`, `categoryTrend`), emitted the four `data-map`
+  parts (competitors/opportunity/catchment/picks) plus a `data-trend` part, and finished
+  with a real caption naming Lichtenrade/Biesdorf/Bohnsdorf. Not a browser click-through
+  (no browser tool available) but the identical wire protocol, against the identical
+  deployed task — stronger evidence than a shallow HTTP check. Both verification runs were
+  cancelled afterward for cleanliness.
 - Slider re-weighting if time allows (client-side, zero round-trip — proven pattern)
 - **Feature freeze, end of day.** Anything unfinished is cut, not rushed.
 

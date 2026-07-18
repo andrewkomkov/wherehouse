@@ -141,8 +141,48 @@ psql "$POSTGRES_URL&sslmode=verify-full&sslrootcert=.secrets/pg-ca.crt" -c "SELE
 `.secrets/` is gitignored. ClickPipe `wherehouse-pg-cdc` replicates
 `public.{shortlists,saved_sites}` → `oltp.pg_*` every 10 s.
 
-**Trigger.dev** — `TRIGGER_SECRET_KEY` in `.env`. Project not yet initialised
-(`npx trigger.dev@latest init`).
+**Trigger.dev** — project `trigger-dev-hackathon` (`proj_klnembmmwmnxxishtmvf`), task
+`wherehouse-chat` (`web/src/trigger/chat.ts`). Two environments, two keys, both in `.env`:
+
+- `TRIGGER_SECRET_KEY` (`tr_dev_…`) — a local `pnpm exec trigger dev` process authenticates
+  as this. Local-dev-only; nothing else should ever hold it.
+- `TRIGGER_SECRET_KEY_PROD` (`tr_prod_…`) — what the deployed Cloudflare Worker
+  (`infra/app-worker/`) holds as its `TRIGGER_SECRET_KEY` secret, so the live site
+  (https://app.slim-shaggy.com) works with **no local process running at all**. Fetched
+  from the API, never typed in by hand — see `infra/deploy-trigger.sh`.
+
+`./infra/deploy-trigger.sh` ships the task to prod and wires everything up (idempotent):
+`env` (import the task's runtime env vars into the Trigger prod environment) → `deploy`
+(`trigger deploy`) → `key` (fetch `TRIGGER_SECRET_KEY_PROD` into `.env`) → `rewire` (point
+the Worker's secret at it) → `verify` (curl smoke test). Run the whole thing with no
+argument. `infra/deploy-app.sh`'s Worker deploy step reads `TRIGGER_SECRET_KEY_PROD`, not
+`TRIGGER_SECRET_KEY` — so rebuilding the site (a UI change, say) can never silently flip
+the live Worker back to the dev key.
+
+Two things this had to discover the hard way (day 5), both fixed in code/scripts, not by
+hand:
+
+- **`trigger deploy` imports every task file in a remote build container as part of the
+  build** ("indexer" step) — any `process.env.X` read eagerly at module load runs THERE
+  too, not only inside a task run. `web/src/lib/pg.ts` used to build its Postgres `Pool`
+  (and read the CA cert file) unconditionally at import time — meaning *every* chat
+  message, not just `saveSite`, would have crashed the deployed task with no way to supply
+  `.secrets/pg-ca.crt` in a deployed container. Fixed: `pg.ts` now prefers a
+  `POSTGRES_CA_CERT` env var (set by `deploy-trigger.sh env`) over the local file; the file
+  read is the local-dev fallback. Import the env vars *before* deploying — the indexer
+  step reads whatever's already in the prod environment.
+- **No CLI subcommand imports env vars or fetches a project's prod secret key** (`trigger
+  env` only has `list`/`get`/`pull`). Both go through the REST API
+  (`POST /projects/{ref}/envvars/{env}/import`, `GET /projects/{ref}/prod`) — and both
+  **reject** the short-lived `tr_uat_…` token from `trigger mint-token` ("Invalid or
+  Missing API key", verified against both endpoints despite the command's own docstring
+  reading like it should work). Only the raw personal access token from `trigger login`
+  is accepted; `deploy-trigger.sh` reads it straight out of the CLI's own config file
+  rather than reinventing a login flow.
+
+Rollback if the prod path ever wedges: `wrangler secret put TRIGGER_SECRET_KEY` in
+`infra/app-worker/`, pasting the `tr_dev_…` key, then run `pnpm exec trigger dev` locally
+as before — that path was never touched by the prod rewire.
 
 Tooling on this machine: node 26, pnpm 10.33, `gh` authed as `andrewkomkov`.
 

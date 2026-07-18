@@ -59,7 +59,7 @@ load_env
 : "${POSTGRES_USER:?missing in .env}"
 : "${POSTGRES_PASSWORD:?missing in .env}"
 : "${POSTGRES_DB:?missing in .env}"
-: "${TRIGGER_SECRET_KEY:?missing in .env}"
+: "${TRIGGER_SECRET_KEY_PROD:?missing in .env — run ./infra/deploy-trigger.sh key first}"
 
 WEB_DIR="$ROOT/web"
 WORKER_DIR="$ROOT/infra/app-worker"
@@ -298,7 +298,11 @@ do_deploy() {
     (cd "$WORKER_DIR" && wrangler deploy)
 
     log "setting Worker secrets (idempotent — always re-put)"
-    (cd "$WORKER_DIR" && printf '%s' "$TRIGGER_SECRET_KEY" | wrangler secret put TRIGGER_SECRET_KEY)
+    # TRIGGER_SECRET_KEY_PROD, not TRIGGER_SECRET_KEY (the tr_dev_… key `trigger dev` uses
+    # locally) — see infra/deploy-trigger.sh for why they're kept separate: this Worker is
+    # the ONE thing the public site talks to, and it must mint prod-scoped tokens so chat
+    # works with no local `trigger dev` process running.
+    (cd "$WORKER_DIR" && printf '%s' "$TRIGGER_SECRET_KEY_PROD" | wrangler secret put TRIGGER_SECRET_KEY)
     (cd "$WORKER_DIR" && printf '%s' "$CLICKHOUSE_SITE_PASSWORD" | wrangler secret put CLICKHOUSE_SITE_PASSWORD)
     ok "$WORKER_NAME deployed with secrets set"
 }
