@@ -8,6 +8,9 @@ node_modules/
 dist/
 build/
 .next/
+# Next static export (`output: "export"`) — rebuildable with `pnpm --dir web build`,
+# and it's what infra/deploy-app.sh loads into ClickHouse, not a source artifact.
+out/
 *.tsbuildinfo
 next-env.d.ts
 .turbo/

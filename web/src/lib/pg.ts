@@ -22,6 +22,13 @@
 import { Pool } from "pg";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { SavedSiteRow } from "./types";
+
+// Re-exported so existing importers (the trigger task, this module's own callers) keep
+// working unchanged. The canonical definition moved to `./types` (day 5) so the browser
+// bundle can import the type without ever pulling in this module's `pg` / `node:fs` deps —
+// see `types.ts` for why.
+export type { SavedSiteRow };
 
 // Both `next dev` and `trigger dev` run with cwd = web/, so the repo-root `.secrets` is one
 // level up; the second path covers a run from the repo root itself. A deploy has no checked-in
@@ -140,21 +147,8 @@ export async function insertSavedSite(input: {
   return { id: Number(result.rows[0].id) };
 }
 
-/** One saved site as the panel reads it, joined to its shortlist for city/business context. */
-export type SavedSiteRow = {
-  id: number;
-  shortlist_id: number;
-  label: string;
-  lon: number;
-  lat: number;
-  h3_8: string;
-  /** null when never scored — the panel shows "unscored", not 0. */
-  score: number | null;
-  status: string;
-  city: string;
-  business_type: string;
-  created_at: string;
-};
+// `SavedSiteRow` (one saved site as the panel reads it) now lives in `./types` — imported
+// and re-exported above.
 
 /**
  * The panel's initial render. Postgres is authoritative here — the newest save is visible with

@@ -16,8 +16,8 @@ import {
   startChatSession,
   saveSiteAction,
   listSavedSitesAction,
-} from "@/app/actions";
-import type { SavedSiteRow } from "@/lib/pg";
+} from "@/lib/api-client";
+import type { SavedSiteRow } from "@/lib/types";
 import { Attribution } from "@/components/attribution";
 import {
   FACTORS,

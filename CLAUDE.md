@@ -207,10 +207,14 @@ Read these before writing any geo SQL. Each cost real time today.
   **ADR-002**: Overture Maps parquet on public S3, queried in place via `s3()`. No OSM
   PBF pipeline. Berlin histogram in 4.0 s cold; bakery H3 density in 1.1 s.
 - [`docs/architecture/clickhouse-as-webserver.md`](docs/architecture/clickhouse-as-webserver.md) —
-  **ADR-003**: the "entire service hosted on ClickHouse" stunt. **Proven on Cloud** —
-  a page stored in a `MergeTree` row serves as real `text/html` over a plain GET, and
-  CORS is open so the browser queries ClickHouse directly. **Decided: Cloud-only**, with
-  a Cloudflare Worker in front purely for clean URLs, credential hiding and caching.
+  **ADR-003**: the "entire service hosted on ClickHouse" stunt. **Built and live** —
+  `https://app.slim-shaggy.com` serves the real app, static-exported and loaded row-by-row
+  into `web.assets`, via the Cloudflare Worker in `infra/app-worker/`
+  (`./infra/deploy-app.sh` rebuilds/redeploys). The Worker also fronts the three
+  server-side ops the static export has no runtime for (Trigger token mint + session
+  start, Postgres save/list via **Hyperdrive** — raw Workers TCP sockets can't validate
+  our Postgres's private CA, Hyperdrive can). CORS-open direct-to-ClickHouse queries from
+  the browser (the original proof) are still how the map's own data loads.
 - [`docs/architecture/oltp-olap.md`](docs/architecture/oltp-olap.md) —
   **ADR-004**: ClickHouse-managed Postgres → ClickPipes CDC → ClickHouse. **Built and
   verified** (~20 s end-to-end). Targets the OLTP+OLAP bonus prize. The point is the

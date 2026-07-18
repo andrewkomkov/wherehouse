@@ -291,10 +291,13 @@ Now spec it — `/speckit-specify` the site-selection answer flow, with what day
 
 ## Day 5 — 21 July · the stunt, then freeze
 
-- **ADR-003 for real**: the app served out of ClickHouse. Page in `web.pages`, Worker in
-  front for clean URLs + credential hiding + caching.
-  ⚠️ Access DDL only on a settled service — `p_html`/`web_html`/`web_html2` are already
-  wedged from doing this during an upgrade.
+- **ADR-003 for real — DONE, verified live 2026-07-18**: `https://app.slim-shaggy.com`.
+  The static export lives in `web.assets` (not `web.pages` — that's still the original
+  day-1 proof-of-concept, untouched); the Worker in `infra/app-worker/` serves it and
+  fronts the three ops the static export has no server for (Trigger token/session,
+  Postgres save/list — the latter needed Hyperdrive, not raw Workers TCP sockets, because
+  Cloudflare's socket TLS can't validate our Postgres's private CA). Rebuild/redeploy:
+  `./infra/deploy-app.sh`. See ADR-003's 2026-07-18 update for the detail.
 - Slider re-weighting if time allows (client-side, zero round-trip — proven pattern)
 - **Feature freeze, end of day.** Anything unfinished is cut, not rushed.
 

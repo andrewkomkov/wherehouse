@@ -1,0 +1,42 @@
+# WhereHouse app worker (day 5 / ADR-003 "for real"): serves the static Next export out of
+# ClickHouse rows (`web.assets`) and fronts the three server-side operations the app needs
+# (Trigger.dev public-token mint, chat-session start, Postgres save/list) that used to be
+# Next.js Server Actions — moved here because the static export has no server runtime.
+#
+# Don't deploy this by hand — `./infra/deploy-app.sh` owns the whole pipeline (build ->
+# load bundle into ClickHouse -> deploy -> verify) and is idempotent.
+name = "wherehouse-app"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Custom domain, not *.workers.dev — same reasoning as the basemap worker (Cache API is
+# inert on workers.dev), and this is the one hostname the browser calls in both dev and
+# prod (see web/src/lib/api-client.ts).
+[[routes]]
+pattern = "app.slim-shaggy.com"
+custom_domain = true
+
+# Postgres access from Workers: raw TCP sockets (`cloudflare:sockets`) fail TLS
+# verification against our managed Postgres's Ubicloud-issued CA — Cloudflare's Sockets
+# API only trusts public root CAs, with no way to supply a custom one. Hyperdrive DOES
+# support a custom CA (`--ca-certificate-id`, uploaded via `wrangler cert upload
+# certificate-authority`) and is the verified fix — see infra/deploy-app.sh and the
+# provisioning notes in README.md.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "6ba4c16dda464b0984f952f7d8bb93ba"
+
+[vars]
+# ClickHouse Cloud (ADR-003). The existing public read-only `site` user (readonly=1,
+# GRANT SELECT ON web.* only) is reused here for the Worker's own asset-serving queries —
+# server-side use of an already-public, already-safe credential, no new ClickHouse access
+# DDL needed for this. CLICKHOUSE_SITE_PASSWORD is still injected as a secret (never
+# committed), even though it's public-by-design elsewhere (NEXT_PUBLIC_*), to keep this
+# file free of any credential value.
+CLICKHOUSE_URL = "https://i69bqvgz9q.eu-west-1.aws.clickhouse.cloud:8443"
+CLICKHOUSE_SITE_USER = "site"
+TRIGGER_TASK_ID = "wherehouse-chat"
+# Origins allowed to call /api/* cross-origin. Same-origin calls (the deployed page calling
+# its own domain) don't need this at all; it exists for `next dev` on localhost.
+ALLOWED_ORIGINS = "http://localhost:3000,https://app.slim-shaggy.com"

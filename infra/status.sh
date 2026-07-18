@@ -71,3 +71,22 @@ if [[ -n "${CLICKHOUSE_PASSWORD:-}" && -n "${CLICKHOUSE_URL:-}" ]]; then
 else
     echo "  (CLICKHOUSE_URL / CLICKHOUSE_PASSWORD unset in .env)"
 fi
+
+echo
+echo "── App (ADR-003 'for real' — infra/app-worker) ──────────"
+# Cloudflare side, not the ClickHouse Cloud API — a live GET, not a config check, because
+# the config can look fine while the bundle in web.assets is stale or the Worker is wedged.
+if command -v curl >/dev/null 2>&1; then
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://app.slim-shaggy.com/ 2>/dev/null || echo "000")"
+    echo "  https://app.slim-shaggy.com/  -> HTTP $code"
+fi
+if [[ -n "${CLICKHOUSE_PASSWORD:-}" && -n "${CLICKHOUSE_URL:-}" ]]; then
+    curl -s --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "
+      SELECT concat('  web.assets: ', toString(count()), ' files, ', formatReadableSize(sum(length(body))), ' total, newest ', toString(max(updated_at)))
+      FROM web.assets FORMAT TSVRaw" 2>/dev/null
+fi
+if command -v wrangler >/dev/null 2>&1 && wrangler whoami >/dev/null 2>&1; then
+    echo "  $(wrangler hyperdrive list 2>/dev/null | grep -c wherehouse-pg-hyperdrive || echo 0) Hyperdrive config(s) named wherehouse-pg-hyperdrive"
+else
+    echo "  (wrangler not authenticated — 'wrangler login' to check Hyperdrive/cert state)"
+fi
