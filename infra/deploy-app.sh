@@ -125,6 +125,7 @@ MIME = {
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".map": "application/json; charset=utf-8",
+    ".pbf": "application/x-protobuf",
 }
 
 

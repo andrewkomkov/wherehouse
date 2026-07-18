@@ -48,7 +48,13 @@ const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: 
 // must say so or MapLibre asks for tiles that were never cut. Deliberately not a CDN basemap:
 // serving our own tiles is part of what we are demonstrating.
 const BASEMAP_TILES = "https://basemap.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt";
-const PM_ASSETS = "https://protomaps.github.io/basemaps-assets";
+// Map glyphs + sprites are vendored into web/public/basemaps-assets, so `next build` bundles
+// them into web.assets and the Worker serves them out of ClickHouse, same-origin. The page now
+// makes ZERO requests to any external host (tiles are already on our own basemap.slim-shaggy.com).
+// SSR-safe: window is undefined during the static-export prerender (the map only ever inits on
+// the client), so ASSET_ORIGIN falls back to "" and the URL stays a valid same-origin relative one.
+const ASSET_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
+const PM_ASSETS = `${ASSET_ORIGIN}/basemaps-assets`;
 
 const CH_URL = process.env.NEXT_PUBLIC_CLICKHOUSE_URL!;
 const CH_USER = process.env.NEXT_PUBLIC_CLICKHOUSE_SITE_USER!;

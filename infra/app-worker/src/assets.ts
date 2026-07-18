@@ -29,8 +29,17 @@ async function chQuery(env: Env, sql: string, params: Record<string, string>): P
 }
 
 function normalizePath(pathname: string): string {
-  if (pathname === "/" || pathname === "") return "/index.html";
-  return pathname;
+  // Decode %-escapes so a request for a stored path with spaces resolves — e.g. the vendored
+  // map glyphs land in web.assets as `/basemaps-assets/fonts/Noto Sans Regular/0-255.pbf`, but
+  // MapLibre requests them URL-encoded (`Noto%20Sans%20Regular`). No-op for ordinary paths.
+  let p = pathname;
+  try {
+    p = decodeURIComponent(pathname);
+  } catch {
+    // Malformed escape — fall back to the raw path rather than throwing.
+  }
+  if (p === "/" || p === "") return "/index.html";
+  return p;
 }
 
 export async function serveAsset(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
