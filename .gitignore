@@ -20,6 +20,9 @@ next-env.d.ts
 .DS_Store
 data/
 *.pbf
+# but DO track the vendored map glyphs — they're part of the self-contained bundle
+# (served out of ClickHouse), not a rebuildable OSM extract.
+!web/public/basemaps-assets/**
 *.pmtiles
 # cut basemap extracts — rebuildable with ./infra/basemap.sh extract
 .basemap/
