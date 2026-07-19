@@ -1,0 +1,70 @@
+{
+  "fps": 60,
+  "totalMs": 119212,
+  "beats": [
+    {
+      "id": "ask",
+      "caption": "Ask in plain words.",
+      "startMs": 2320,
+      "endMs": 10142,
+      "source": "app",
+      "sourceInMs": 2320
+    },
+    {
+      "id": "assemble",
+      "caption": "The map is the answer — assembling live from ClickHouse.",
+      "startMs": 10142,
+      "endMs": 29794,
+      "source": "app",
+      "sourceInMs": 10142
+    },
+    {
+      "id": "pick",
+      "caption": "Lichtenrade — real name, real numbers, nothing invented.",
+      "startMs": 29794,
+      "endMs": 53871,
+      "source": "app",
+      "sourceInMs": 29794
+    },
+    {
+      "id": "reweight",
+      "caption": "Ask it to re-weight — the agent drives the controls itself.",
+      "startMs": 53871,
+      "endMs": 63897,
+      "source": "app",
+      "sourceInMs": 53871
+    },
+    {
+      "id": "scale",
+      "caption": "6,700 points — too big for the chat stream, so it isn't in it.",
+      "startMs": 63897,
+      "endMs": 82367,
+      "source": "app",
+      "sourceInMs": 63897
+    },
+    {
+      "id": "compare",
+      "caption": "A saved site, re-scored against 75M live POIs.",
+      "startMs": 82367,
+      "endMs": 91131,
+      "source": "app",
+      "sourceInMs": 82367
+    },
+    {
+      "id": "console",
+      "caption": "The whole app is a row in ClickHouse.",
+      "startMs": 91131,
+      "endMs": 101710,
+      "source": "console",
+      "sourceInMs": 577
+    },
+    {
+      "id": "close",
+      "caption": "Ask a question. Get a map.",
+      "startMs": 101710,
+      "endMs": 117712,
+      "source": "app",
+      "sourceInMs": 91131
+    }
+  ]
+}

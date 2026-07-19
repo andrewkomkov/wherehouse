@@ -29,3 +29,14 @@ data/
 *.parquet
 .venv/
 __pycache__/
+
+# video pipeline — heavy build artifacts, not source
+video/**/node_modules/
+video/out/
+video/remotion/out/
+video/remotion/public/screen.mp4
+video/remotion/public/console.mp4
+video/remotion/public/narration.mp3
+video/voiceover/out/
+video/voiceover/.venv/
+video/**/__pycache__/

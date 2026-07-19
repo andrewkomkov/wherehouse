@@ -1,0 +1,39 @@
+{
+  "voice": "Zephyr",
+  "model": "gemini-2.5-pro-preview-tts",
+  "style": "Read as a calm, confident product narrator for a short demo film. Unhurried, warm, clear. Light emphasis on the product names ClickHouse, Trigger.dev, Valhalla, and on the payoff at the end. Natural pauses between sentences.",
+  "beats": [
+    {
+      "id": "ask",
+      "text": "Where should you open a bakery in Berlin? Watch the answer draw itself."
+    },
+    {
+      "id": "assemble",
+      "text": "No wall of text. A Trigger dot dev agent calls ClickHouse tool by tool, and each result draws itself onto the map — competitors, an opportunity surface, the three best sites, a walking catchment measured on real streets."
+    },
+    {
+      "id": "pick",
+      "text": "The winner is Lichtenrade — a dense residential edge with no bakery nearby. The name comes from real boundary geometry. The numbers are the ones the score ranked on. And the fourteen-thousand-person walk reach? Measured by Valhalla against the actual street network. Not guessed."
+    },
+    {
+      "id": "reweight",
+      "text": "You don't just read the answer — you argue with it. Ask for more walkability, and the agent moves the sliders. The map re-scores live."
+    },
+    {
+      "id": "scale",
+      "text": "And it scales. Every food and drink venue in Berlin — thousands of points. Too large for the chat stream's one-megabyte limit, so it never touches it. It lands in ClickHouse, and the browser reads it straight from the database."
+    },
+    {
+      "id": "compare",
+      "text": "Save a site to Postgres, and change data capture streams it into ClickHouse — re-scored against seventy-five million live points, in one query."
+    },
+    {
+      "id": "console",
+      "text": "One last thing — there is no web server. This entire app is a row in ClickHouse. Every file, a row you can query."
+    },
+    {
+      "id": "close",
+      "text": "The agent runs on Trigger dot dev's cloud. Ask a question, get a map — not a wall of text. That's WhereHouse."
+    }
+  ]
+}

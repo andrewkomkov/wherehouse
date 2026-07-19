@@ -1,0 +1,21 @@
+{
+  "name": "wherehouse-video-remotion",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Remotion composition: WhereHouse screen footage + synced lower-third captions",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render Demo out/wherehouse-demo.mp4 --codec=h264",
+    "still": "remotion still Demo out/frame.png --frame=200"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.230",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "remotion": "^4.0.230"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

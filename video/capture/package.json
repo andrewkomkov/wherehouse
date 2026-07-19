@@ -1,0 +1,13 @@
+{
+  "name": "wherehouse-video-capture",
+  "private": true,
+  "type": "module",
+  "description": "Playwright screen-capture of the WhereHouse demo, driven by ../beats.json",
+  "scripts": {
+    "capture": "node capture.mjs",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
