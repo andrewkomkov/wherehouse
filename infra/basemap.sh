@@ -30,6 +30,8 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/.basemap}"   # gitignored: .pmtiles are build arti
 # name|bbox|maxzoom
 CITIES=(
     "berlin|13.088,52.338,13.761,52.675|14"
+    "amsterdam|4.68,52.27,5.07,52.44|14"
+    "belgrade|20.2,44.66,20.65,44.92|14"
 )
 
 # --- helpers -----------------------------------------------------------------
@@ -112,17 +114,25 @@ do_deploy() {
 
 # Live checks. A deploy reporting success proves nothing about tiles being served.
 do_verify() {
-    local city name url code ctype bytes tilejson
+    local city name bbox maxzoom url code ctype bytes tilejson tile
     for city in "${CITIES[@]}"; do
-        IFS='|' read -r name _ _ <<<"$city"
+        IFS='|' read -r name bbox maxzoom <<<"$city"
 
         tilejson="https://$HOSTNAME_PUBLIC/$name.json"
         code="$(curl -s -o /dev/null -w '%{http_code}' "$tilejson")"
         [[ "$code" == "200" ]] || die "TileJSON $tilejson -> HTTP $code"
         ok "TileJSON 200: $tilejson"
 
-        # z14 tile over central Berlin — must be a non-trivial protobuf, not an empty 204.
-        url="https://$HOSTNAME_PUBLIC/$name/14/8802/5373.mvt"
+        # A representative tile = the bbox centre at maxzoom, computed per city (Web Mercator
+        # slippy-map math), so this check is correct for every city, not just Berlin. It must be
+        # a non-trivial protobuf, not an empty 204.
+        tile="$(awk -v b="$bbox" -v z="$maxzoom" 'BEGIN{
+            split(b, a, ","); lon=(a[1]+a[3])/2; lat=(a[2]+a[4])/2; n=2^z;
+            r=lat*3.141592653589793/180;
+            printf "%d/%d/%d", z, int((lon+180)/360*n),
+                int((1 - log(sin(r)/cos(r) + 1/cos(r))/3.141592653589793)/2*n);
+        }')"
+        url="https://$HOSTNAME_PUBLIC/$name/$tile.mvt"
         # The trailing newline is load-bearing: without it `read` hits EOF, returns
         # non-zero and `set -e` kills the script before any check runs.
         read -r code ctype bytes < <(curl -s -o /dev/null \
