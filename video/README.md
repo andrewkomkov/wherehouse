@@ -42,7 +42,9 @@ Output: `remotion/out/wherehouse-demo.mp4`.
 |---|---|
 | `scenario.md` | Shot-by-shot beat sheet (human-facing) |
 | `voiceover.md` | Narration, English + Russian, plus the submission-form text |
-| `beats.json` | Machine-readable beats — the source of truth capture **and** render share |
+| `beats.json` | Machine-readable beats — the source of truth capture **and** render share. The active city's sheet; the pipeline reads this one |
+| `beats.amsterdam.json` / `beats.belgrade.json` | Per-city beat sheets (coffee shop / gym). `cp beats.<city>.json beats.json` before a run to shoot that city; `beats.json` itself is the Berlin default |
+| `voiceover/vo.amsterdam.en.json` / `vo.belgrade.en.json` | Per-city narration; `cp` onto `voiceover/vo.en.json` then `generate.py vo` before mixing that city |
 | `capture/capture.mjs` | Playwright: drives the app + the ClickHouse `/play` console per `beats.json`, records both, measures/stitches timings |
 | `infra/create-console-user.sh` | Provisions the dedicated READONLY user the console beat drives `/play` as (never `site` — see the script) |
 | `remotion/` | Remotion composition: footage + synced captions + brand |

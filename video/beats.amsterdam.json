@@ -1,0 +1,121 @@
+{
+  "meta": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "accent": "#6ff0e0",
+    "win": "#FAFF69",
+    "appUrlDefault": "http://localhost:3000"
+  },
+  "beats": [
+    {
+      "id": "ask",
+      "label": "The question",
+      "action": "typeLanding",
+      "text": "where should I open a coffee shop in Amsterdam?",
+      "caption": "Ask in plain words.",
+      "targetMs": 12000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "assemble",
+      "label": "The map assembles itself",
+      "action": "awaitAssembly",
+      "caption": "The map is the answer — assembling live from ClickHouse.",
+      "targetMs": 26000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "pick",
+      "label": "Why this pick",
+      "action": "focusTopPickAndSave",
+      "caption": "Nieuw-West — real name, real numbers, nothing invented.",
+      "captionAt": "top",
+      "targetMs": 27000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "reweight",
+      "label": "The agent operates the UI",
+      "action": "ask",
+      "text": "weight walkability to the max",
+      "caption": "Ask it to re-weight — the agent drives the controls itself.",
+      "targetMs": 25000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "scale",
+      "label": "Every food & drink venue",
+      "action": "ask",
+      "text": "show me all food and drink",
+      "caption": "2,567 points — too big for the chat stream, so it isn't in it.",
+      "targetMs": 22000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "compare",
+      "label": "OLTP x OLAP",
+      "action": "compareSaved",
+      "caption": "A saved site, re-scored against 75M live POIs.",
+      "targetMs": 26000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "console",
+      "label": "The app is a row in ClickHouse",
+      "action": "chConsole",
+      "query": "SELECT path, content_type, formatReadableSize(length(body)) AS size\nFROM web.assets\nWHERE content_type LIKE 'text/html%'",
+      "caption": "The whole app is a row in ClickHouse.",
+      "targetMs": 14000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    },
+    {
+      "id": "close",
+      "label": "The close",
+      "action": "showMap",
+      "caption": "Ask a question. Get a map.",
+      "targetMs": 16000,
+      "zoom": {
+        "fx": 0.5,
+        "fy": 0.5,
+        "s0": 1.0,
+        "s1": 1.0
+      }
+    }
+  ]
+}
