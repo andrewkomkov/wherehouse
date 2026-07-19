@@ -53,6 +53,10 @@ const APP_URL = process.env.APP_URL || beatsDoc.meta.appUrlDefault;
 const HEADFUL = process.env.HEADFUL === "1";
 const SLOWMO = Number(process.env.SLOWMO || 0);
 const TAIL_MS = 1500; // held on the last frame of the timeline
+// The first beat's action only fires once the app is interactive; a slow/cold load is captured as
+// dead landing footage ahead of it. We open the OUTPUT timeline on this short, fixed lead-in
+// instead (the recording itself is untouched — see the trim in buildTimeline).
+const LEAD_IN_MS = 800;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -147,6 +151,13 @@ function buildTimeline(allIds, appTimings, consoleBeat, consoleRun) {
       // shift by — not the full raw recording length (which still includes the trimmed lead).
       offset += consoleVisibleMs;
     }
+  }
+  // Trim the app-load pre-roll: shift the whole OUTPUT timeline so the first beat opens on a short
+  // fixed lead-in rather than however long the app took to become interactive. sourceInMs is left
+  // alone, so each beat still pulls from its own place in the recording — only the timeline moves.
+  if (beats.length) {
+    const shift = beats[0].startMs - LEAD_IN_MS;
+    if (shift > 0) for (const b of beats) { b.startMs -= shift; b.endMs -= shift; }
   }
   const totalMs = (beats.at(-1)?.endMs ?? 0) + TAIL_MS;
   return { beats, totalMs };
@@ -353,9 +364,29 @@ function makeActions(page) {
     // Beat 3 — focus the #1 pick's provenance. Click the top row in the runs/picks rail.
     focusTopPick: async (b) => {
       const btn = page.locator("text=/why the #?1 pick|#1 pick/i").first();
-      if (await btn.count()) await btn.click().catch(() => {});
+      // Short timeout: if the chip is present but not actionable, we don't want the default 30s
+      // hang eating the beat — just move on and hold the map.
+      if (await btn.count()) await btn.click({ timeout: 3500 }).catch(() => {});
       // Fallback: click the brightest pin near the map centre-right if the chip isn't present.
       await sleep(b.targetMs - 3000);
+    },
+    // Same as focusTopPick, but ALSO saves the #1 pick first (a real `.wh-save` click, so it goes
+    // to Postgres via saveSiteAction — no agent round-trip needed). Used by cities that have no
+    // pre-existing saved sites of their own, so a later "compare" beat (`compareSaved`) has a real
+    // site for THIS city to re-score — the compare button only renders once `displaySavedSites`
+    // is non-empty. Saving first (before the "why the #1 pick?" ask) leaves the CDC replication
+    // (~10s) the most possible headroom before the compare beat runs.
+    focusTopPickAndSave: async (b) => {
+      // Short timeouts on both clicks: if the pick is ALREADY saved (e.g. a re-shoot after a prior
+      // take saved it), the save button sits in its "saved" state and is not actionable — the
+      // default 30s click timeout would otherwise blow the beat out to ~54s. Capped + caught, it
+      // no-ops in a few seconds and the beat holds the pick view as intended.
+      const saveBtn = page.locator(".wh-save").first();
+      if (await saveBtn.count()) await saveBtn.click({ timeout: 3500 }).catch(() => {});
+      await sleep(700);
+      const btn = page.locator("text=/why the #?1 pick|#1 pick/i").first();
+      if (await btn.count()) await btn.click({ timeout: 3500 }).catch(() => {});
+      await sleep(Math.max(0, b.targetMs - 3700));
     },
     // Generic agent ask through the docked composer.
     ask: async (b) => {
