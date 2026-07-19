@@ -106,7 +106,26 @@ INSERT INTO geo.affinity (target, neighbor, weight) VALUES
     ('kindergarten', 'elementary_school', 0.9),
     ('kindergarten', 'park', 0.8),
     ('kindergarten', 'pharmacy', 0.5),
-    ('kindergarten', 'bakery', 0.5);
+    ('kindergarten', 'bakery', 0.5),
+    -- dentist: a health-cluster destination — patients and referrals flow between medical trades.
+    ('dentist', 'doctor', 0.9),
+    ('dentist', 'pharmacy', 0.8),
+    ('dentist', 'physical_therapy', 0.6),
+    ('dentist', 'beauty_salon', 0.3),
+    ('dentist', 'supermarket', 0.3),
+    -- hair_salon: a beauty/high-street trade — footfall shared with grooming and shopping.
+    ('hair_salon', 'beauty_salon', 0.7),
+    ('hair_salon', 'nail_salon', 0.7),
+    ('hair_salon', 'clothing_store', 0.6),
+    ('hair_salon', 'cafe', 0.5),
+    ('hair_salon', 'coffee_shop', 0.5),
+    ('hair_salon', 'gym', 0.4),
+    -- hotel: hospitality — guests spend on dining, nightlife and nearby attractions.
+    ('hotel', 'landmark_and_historical_building', 0.9),
+    ('hotel', 'restaurant', 0.8),
+    ('hotel', 'bar', 0.7),
+    ('hotel', 'cafe', 0.6),
+    ('hotel', 'coffee_shop', 0.6);
 
 -- Keyed on (target, neighbor); a miss returns 0 (the absent-is-not-zero contract lives in the
 -- consumer, which must read a 0 as "no complementary trades nearby", never as a measured fit).

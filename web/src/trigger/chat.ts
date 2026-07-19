@@ -88,24 +88,36 @@ type WhereHouseDataTypes = { map: MapData; trend: TrendData; ui: UiCommand };
  * other. Deliberately a lookup and not an LLM taxonomy mapper: it answers every question we
  * demo, and inference would be a day of work for zero rubric points.
  *
+ * Only the trades that shine end-to-end are exposed: real Overture POI in all three demo cities
+ * (Berlin/Amsterdam/Belgrade), an editorial affinity target (F5), and a historical trend (F3).
+ * kindergarten (no POI), bar/pub (no affinity target) and fast_food (no POI) are deliberately
+ * left off the model's surface — their ClickHouse data stays, we just don't offer them.
+ *
  * A group (several categories) is how a question gets wide enough to exceed the stream cap —
- * which is the point of User Story 2, not an accident.
+ * which is the point of User Story 2, not an accident. The group is built ONLY from shining
+ * trades (restaurant + cafe + bakery) and is still wide enough to take the handle path in all
+ * three cities.
  */
 const CATEGORY_SYNONYMS: Record<string, string[]> = {
   bakery: ["bakery"],
   bakeries: ["bakery"],
   pharmacy: ["pharmacy"],
   pharmacies: ["pharmacy"],
-  kindergarten: ["kindergarten"],
   cafe: ["cafe"],
   coffee: ["cafe"],
   restaurant: ["restaurant"],
   restaurants: ["restaurant"],
-  bar: ["bar"],
   supermarket: ["supermarket"],
   gym: ["gym"],
-  "food and drink": ["restaurant", "cafe", "bar", "fast_food", "bakery", "pub"],
-  "food & drink": ["restaurant", "cafe", "bar", "fast_food", "bakery", "pub"],
+  dentist: ["dentist"],
+  dentists: ["dentist"],
+  "hair salon": ["hair_salon"],
+  "hair salons": ["hair_salon"],
+  hairdresser: ["hair_salon"],
+  hotel: ["hotel"],
+  hotels: ["hotel"],
+  "food and drink": ["restaurant", "cafe", "bakery"],
+  "food & drink": ["restaurant", "cafe", "bakery"],
 };
 
 function resolveCategories(input: string): string[] {
@@ -123,7 +135,7 @@ const target = z.object({
     .string()
     .describe(
       `the trade. One of: ${Object.keys(CATEGORY_SYNONYMS).join(", ")}. ` +
-        `"food and drink" is a GROUP covering restaurants, cafes, bars, fast food, bakeries and pubs — ` +
+        `"food and drink" is a GROUP covering restaurants, cafes and bakeries — ` +
         `use it when the user asks broadly about eating and drinking rather than one trade.`,
     ),
 });
@@ -696,7 +708,7 @@ export const SYSTEM_PROMPT = [
   // sentence: answering it with prose alone is the exact defect this feature fixes. Every such
   // request has a tool, and a UI or rebuild request must NEVER resolve as a pure-text turn.
   "When the user asks to change what is on screen, DO IT with a tool — never answer such a request with prose alone. A request to change the view or the answer must never be a text-only reply.",
-  "A new trade or a new city is a full REBUILD: call findCompetitors, then scoreArea, then rankSites, then showCatchment for the new (city, trade). 'what about kindergartens?', 'show me pharmacies instead', 'and in Amsterdam?' are rebuilds, not remarks.",
+  "A new trade or a new city is a full REBUILD: call findCompetitors, then scoreArea, then rankSites, then showCatchment for the new (city, trade). 'what about gyms?', 'show me pharmacies instead', 'and in Amsterdam?' are rebuilds, not remarks.",
   "For a request about the CURRENT view, call the matching UI tool: 'hide/show the competitors (or any layer)' -> setLayer; 'weight walkability/residents/competition higher or to the max' -> reweight (only those three factors — there is NO rent); 'show me the worst/best place' -> highlightExtreme; 'open pick 2' or 'show the #1 pick' -> focusPick; 'go back to the bakery answer' or an earlier run -> reviewRun; 'export/download/share a report or PDF' -> exportReport.",
   "After acting you MAY add at most ONE short caption sentence — never instead of acting, only after. If a request would change the screen and you only wrote text, you failed it.",
   "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",
