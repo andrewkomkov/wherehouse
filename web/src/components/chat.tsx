@@ -46,8 +46,24 @@ const EMPTY: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: 
 
 // Our own Protomaps tiles out of R2 (infra/basemap.sh). The extract stops at z14, so maxzoom
 // must say so or MapLibre asks for tiles that were never cut. Deliberately not a CDN basemap:
-// serving our own tiles is part of what we are demonstrating.
-const BASEMAP_TILES = "https://basemap.slim-shaggy.com/berlin/{z}/{x}/{y}.mvt";
+// serving our own tiles is part of what we are demonstrating. One extract per demo city — the
+// source's tiles are re-pointed at the right city the moment the first answer resolves where it
+// is (see basemapCityFor + setTiles below); Berlin is only the pre-answer default.
+const basemapTilesUrl = (city: string) =>
+  `https://basemap.slim-shaggy.com/${city}/{z}/{x}/{y}.mvt`;
+const BASEMAP_TILES = basemapTilesUrl("berlin");
+// Which city extract to serve, from a point (the resolved competitor bbox centre). The three demo
+// cities are far apart in longitude, so a bbox test is unambiguous; anything outside them falls
+// back to Berlin. bboxes mirror CITIES in web/src/trigger/scoring.ts.
+const CITY_BASEMAPS: { name: string; lon: [number, number]; lat: [number, number] }[] = [
+  { name: "berlin", lon: [13.088, 13.761], lat: [52.338, 52.675] },
+  { name: "amsterdam", lon: [4.68, 5.07], lat: [52.27, 52.44] },
+  { name: "belgrade", lon: [20.2, 20.65], lat: [44.66, 44.92] },
+];
+const basemapCityFor = (lon: number, lat: number): string =>
+  CITY_BASEMAPS.find(
+    (c) => lon >= c.lon[0] && lon <= c.lon[1] && lat >= c.lat[0] && lat <= c.lat[1],
+  )?.name ?? "berlin";
 // Map glyphs + sprites are vendored into web/public/basemaps-assets, so `next build` bundles
 // them into web.assets and the Worker serves them out of ClickHouse, same-origin. The page now
 // makes ZERO requests to any external host (tiles are already on our own basemap.slim-shaggy.com).
@@ -1015,6 +1031,14 @@ export function Chat() {
             // Wave 1 in the comp is "fly to the city". Ours flies when the competitor bbox
             // lands, because that is when we first know where the city is — the agent resolved
             // it, we did not hardcode it.
+            // Point the basemap source at THIS city's extract before flying (Berlin was only the
+            // default). Same reasoning: the city is discovered from the resolved bbox, not baked in.
+            const src = m.getSource("basemap") as
+              | { setTiles?: (tiles: string[]) => void }
+              | undefined;
+            src?.setTiles?.([
+              basemapTilesUrl(basemapCityFor((w + e) / 2, (s + n) / 2)),
+            ]);
             // The map now lives inside the centre column, so the padding is modest and symmetric
             // (was left:380 to clear the old floating rail). A little extra at the bottom keeps the
             // caption overlay from covering the fitted bounds.
