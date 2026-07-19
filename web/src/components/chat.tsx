@@ -128,6 +128,18 @@ type WaveState = "pending" | "active" | "done";
 const SUGGESTIONS = ["compare vs the market", "why the #1 pick?", "show pharmacies instead"] as const;
 
 /**
+ * The first-visit omnibar's example prompts. Unlike SUGGESTIONS (which nudge an already-built
+ * answer), these are complete, cold-start questions — one across each demo city, each a real
+ * (city, trade) the tools can answer. Clicking one both fills the box and asks, so the landing
+ * doubles as a one-click demo path.
+ */
+const LANDING_SUGGESTIONS = [
+  "where should I open a bakery in Berlin?",
+  "find a spot for a pharmacy in Amsterdam",
+  "where is a cafe underserved in Belgrade?",
+] as const;
+
+/**
  * A grouped agent run for the left rail. `kind` is honest and structural: `rebuild` produced the
  * picks layer (a fresh answer), `steer` produced some other layer but no picks (a nudge to the
  * existing map), `talk` produced no map at all (a pure conversational turn).
@@ -512,8 +524,17 @@ export function Chat() {
   // receive the same value). Saving a pick from the client threads it through so the save lands
   // under the same shortlist scope as the conversation.
   const { messages, sendMessage, setMessages, status, id: chatId } = useChat<Msg>({ transport });
-  const [input, setInput] = useState("where should I open a bakery in Berlin?");
+  const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The two-screen shell. "landing" is the first-visit omnibar (Claude/ChatGPT style, centred over
+   * an as-yet-empty map); "app" is the assembled dashboard. `leaving` drives the one-shot exit
+   * animation between them — the overlay is still mounted while it plays, then unmounts. The map
+   * lives under the overlay the whole time, so MapLibre inits at full size and there is nothing to
+   * resize when the overlay clears.
+   */
+  const [phase, setPhase] = useState<"landing" | "app">("landing");
+  const [leaving, setLeaving] = useState(false);
   const [weights, setWeights] = useState<Weights>({ ...NEUTRAL });
   const [visible, setVisible] = useState<Record<LayerId, boolean>>({
     opportunity: true,
@@ -1292,6 +1313,12 @@ export function Chat() {
     if (!sentThisSession.current && messages.some((m) => m.role === "assistant")) setResumed(true);
   }, [messages]);
 
+  // A restored conversation has a map already — skip the first-visit omnibar straight to the
+  // dashboard. (With no persistence `resumed` never fires, so a fresh load always sees the omnibar.)
+  useEffect(() => {
+    if (resumed) setPhase("app");
+  }, [resumed]);
+
   /**
    * Ask the agent. Same reset-on-submit as before (store/painted/gen cleared, box emptied) so the
    * happy path is untouched; additionally returns the map to live-follow. The run stack keeps the
@@ -1310,10 +1337,20 @@ export function Chat() {
       store.current = {};
       painted.current.clear();
       gen.current++;
+      // First question from the landing omnibar: play the transition, then reveal the dashboard.
+      // The exit animation runs while the overlay is still mounted; ~820 ms later it unmounts, by
+      // which time the agent's first tool results are already streaming into the map behind it.
+      if (phase === "landing") {
+        setLeaving(true);
+        window.setTimeout(() => {
+          setPhase("app");
+          setLeaving(false);
+        }, 820);
+      }
       sendMessage({ text });
       setInput("");
     },
-    [busy, sendMessage],
+    [busy, sendMessage, phase],
   );
 
   /** Clear the session and the map — the top-bar ⟲. Wipes client state; Postgres history is kept. */
@@ -1329,6 +1366,11 @@ export function Chat() {
     setError(null);
     setResumed(false);
     setMessages([]);
+    // Clearing the session returns to the welcome omnibar — the same screen a first-time visitor
+    // sees — rather than an empty dashboard, so "clear" reads as "start over", not "blank state".
+    setPhase("landing");
+    setLeaving(false);
+    setInput("");
     const m = map.current;
     if (m && m.getLayer("opportunity")) {
       for (const id of LAYER_IDS)
@@ -1658,6 +1700,81 @@ export function Chat() {
       }}
     >
       <style>{CSS}</style>
+
+      {/* ========================= LANDING OMNIBAR ========================= */}
+      {/* First visit: a centred, Claude/ChatGPT-style input over an empty map. The map is already
+          mounted and sized beneath this overlay, so submitting plays the exit animation and simply
+          uncovers the assembling dashboard — no remount, no resize. */}
+      {phase === "landing" && (
+        <div className={`wh-land${leaving ? " wh-land-exit" : ""}`} aria-hidden={leaving}>
+          <div className="wh-land-aura" />
+          <div className="wh-land-mesh" />
+          <div className="wh-land-inner">
+            <div className="wh-land-brand">
+              <div className="wh-land-logo">
+                <span />
+              </div>
+              <span className="wh-land-word">WhereHouse</span>
+              <span className="wh-land-tag">site selection, drawn not written</span>
+            </div>
+
+            <h1 className="wh-land-head">
+              Where should you <span className="wh-land-em">open it</span>?
+            </h1>
+            <p className="wh-land-sub">
+              Ask in plain words. The answer is a live map that assembles itself — the competition,
+              an opportunity surface, and the three best sites — each drawn from millions of points
+              in ClickHouse, streamed by a Trigger.dev agent.
+            </p>
+
+            <form
+              className="wh-land-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                ask(input);
+              }}
+            >
+              <input
+                autoFocus
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="where should I open a bakery in Berlin?"
+                className="wh-land-input"
+                aria-label="Ask where to open your business"
+              />
+              <button type="submit" className="wh-land-go" aria-label="ask">
+                →
+              </button>
+            </form>
+
+            <div className="wh-land-chips">
+              {LANDING_SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className="wh-land-chip"
+                  onClick={() => {
+                    setInput(s);
+                    ask(s);
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+
+            <div className="wh-land-foot">
+              <span>Berlin</span>
+              <i />
+              <span>Amsterdam</span>
+              <i />
+              <span>Belgrade</span>
+              <span className="wh-land-foot-sep" />
+              <span className="wh-land-foot-tech">ClickHouse × Trigger.dev</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============================ TOP BAR ============================ */}
       <div className="wh-topbar">
@@ -3165,6 +3282,74 @@ input[type=range]:disabled{opacity:.5}
   50%{box-shadow:0 0 0 3px rgba(9,11,14,.5),0 0 0 9px rgba(231,236,240,0)}}
 @keyframes wh-caret{0%,100%{opacity:1}50%{opacity:0}}
 @keyframes wh-run{to{transform:rotate(360deg)}}
+
+/* ---- first-visit landing omnibar + its transition to the dashboard ---- */
+.wh-land{position:fixed;inset:0;z-index:60;display:grid;place-items:center;overflow:hidden;
+  background:radial-gradient(120% 90% at 50% 6%,#0d1015 0%,#0a0c0f 58%,#070809 100%);
+  animation:wh-land-in .45s ease both}
+.wh-land-exit{animation:wh-land-out .82s cubic-bezier(.4,0,.2,1) forwards;pointer-events:none}
+.wh-land-aura{position:absolute;left:50%;top:34%;width:min(1100px,125vw);height:min(1100px,125vw);
+  transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,rgba(111,240,224,.16) 0%,rgba(111,240,224,.05) 34%,transparent 62%);
+  filter:blur(6px);animation:wh-land-breathe 9s ease-in-out infinite}
+.wh-land-mesh{position:absolute;inset:-45% -10% -8%;pointer-events:none;opacity:.55;
+  background-image:linear-gradient(rgba(111,240,224,.055) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(111,240,224,.055) 1px,transparent 1px);
+  background-size:46px 46px;
+  transform:perspective(680px) rotateX(58deg) scale(1.7);transform-origin:50% 100%;
+  -webkit-mask-image:radial-gradient(72% 62% at 50% 28%,#000 28%,transparent 78%);
+  mask-image:radial-gradient(72% 62% at 50% 28%,#000 28%,transparent 78%);
+  animation:wh-land-pan 22s linear infinite}
+.wh-land-inner{position:relative;z-index:2;width:min(660px,92vw);padding:0 20px;text-align:center;
+  animation:wh-land-rise .7s cubic-bezier(.22,1,.36,1) both .05s}
+.wh-land-exit .wh-land-inner{animation:wh-land-lift .82s cubic-bezier(.4,0,.2,1) forwards}
+.wh-land-brand{display:inline-flex;align-items:center;gap:10px;margin-bottom:30px}
+.wh-land-logo{width:26px;height:26px;border-radius:7px;background:${C.win};display:grid;place-items:center;
+  box-shadow:0 6px 22px -6px rgba(250,255,105,.5)}
+.wh-land-logo span{width:10px;height:10px;border-radius:50%;border:2.5px solid ${C.bg}}
+.wh-land-word{font-family:${SANS};font-weight:700;font-size:18px;letter-spacing:-.01em;color:${C.text}}
+.wh-land-tag{font-family:${MONO};font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:${C.dim};padding-top:2px}
+.wh-land-head{margin:0 0 14px;font-family:${SANS};font-weight:600;letter-spacing:-.028em;
+  font-size:clamp(30px,5vw,50px);line-height:1.05;color:#f3f6f8}
+.wh-land-em{color:${C.accent}}
+.wh-land-sub{margin:0 auto 30px;max-width:524px;font-family:${SANS};font-size:14.5px;line-height:1.6;
+  color:#9aa4ad}
+.wh-land-form{position:relative;margin:0 auto;max-width:560px}
+.wh-land-input{width:100%;box-sizing:border-box;padding:17px 60px 17px 20px;border-radius:15px;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:${C.text};
+  font-family:${SANS};font-size:16px;outline:none;
+  box-shadow:0 18px 50px -22px rgba(0,0,0,.9),inset 0 1px 0 rgba(255,255,255,.04);
+  transition:border-color .2s,box-shadow .2s,background .2s}
+.wh-land-input::placeholder{color:#5c6771}
+.wh-land-input:focus{border-color:rgba(111,240,224,.55);background:rgba(255,255,255,.06);
+  box-shadow:0 0 0 4px rgba(111,240,224,.1),0 18px 50px -20px rgba(0,0,0,.9)}
+.wh-land-go{position:absolute;right:9px;top:50%;transform:translateY(-50%);width:40px;height:40px;
+  border:none;border-radius:11px;background:${C.accent};color:#062018;font-weight:800;font-size:19px;
+  cursor:pointer;display:grid;place-items:center;transition:transform .15s;
+  box-shadow:0 6px 20px -6px rgba(111,240,224,.6)}
+.wh-land-go:hover{transform:translateY(-50%) scale(1.06)}
+.wh-land-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:16px}
+.wh-land-chip{padding:8px 14px;border-radius:22px;background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.1);color:#aeb7bf;font-family:${SANS};font-size:12.5px;cursor:pointer;
+  transition:border-color .18s,color .18s,background .18s,transform .18s}
+.wh-land-chip:hover{border-color:rgba(111,240,224,.4);color:#cdeee8;background:rgba(111,240,224,.06);
+  transform:translateY(-1px)}
+.wh-land-foot{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:38px;
+  font-family:${MONO};font-size:10.5px;letter-spacing:.06em;color:#69737d}
+.wh-land-foot i{width:3px;height:3px;border-radius:50%;background:#3a424b}
+.wh-land-foot-sep{width:1px;height:11px;background:rgba(255,255,255,.12);margin:0 3px}
+.wh-land-foot-tech{color:#8a949d}
+@keyframes wh-land-in{from{opacity:0}to{opacity:1}}
+@keyframes wh-land-out{from{opacity:1}to{opacity:0}}
+@keyframes wh-land-rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+@keyframes wh-land-lift{to{opacity:0;transform:translateY(-26px) scale(1.05)}}
+@keyframes wh-land-breathe{0%,100%{transform:translate(-50%,-50%) scale(1);opacity:.85}
+  50%{transform:translate(-50%,-52%) scale(1.08);opacity:1}}
+@keyframes wh-land-pan{to{background-position:0 46px,46px 0}}
+@media (prefers-reduced-motion:reduce){
+  .wh-land,.wh-land-inner,.wh-land-aura,.wh-land-mesh,.wh-land-exit,.wh-land-exit .wh-land-inner{animation:none!important}
+}
 @media (prefers-reduced-motion:reduce){
   .wh-marker,.wh-dot,.wh-ring,.wh-caret,.wh-spin,.wh-extreme-ring{animation:none!important;transition:none!important}
 }
