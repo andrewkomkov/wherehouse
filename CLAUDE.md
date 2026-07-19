@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 **WhereHouse** — a chat agent that answers *"where should I open a bakery / pharmacy /
-kindergarten?"* with a **live map**, not a paragraph. Built for the ClickHouse ×
+gym?"* with a **live map**, not a paragraph. Built for the ClickHouse ×
 Trigger.dev Virtual Summer Hackathon 2026 (17–23 July).
 
 Demo cities: **Berlin, Amsterdam, Belgrade**.
@@ -307,6 +307,20 @@ the accumulated API gotchas.
 
 Shell style note: `cmd | python3 - <<'PY'` **steals stdin** and the pipe never arrives.
 Use `cmd | python3 -c "$(cat <<'PY' … PY)"`. This bit us in `status.sh`.
+
+## Agents & skills — where the hard-won know-how lives
+
+Domain knowledge is packaged so it doesn't have to be rediscovered. Load the skill (or use the
+agent) for the matching task instead of re-deriving:
+
+| Agent (`.claude/agents/`) | Skill (`.claude/skills/`) | For |
+|---|---|---|
+| `infra-keeper` | — | ClickHouse/Postgres/CDC provisioning, pipe failures, spend, teardown — Cloud REST API gotchas |
+| `video-director` | `wherehouse-video` | The demo video: Playwright capture, Remotion compose, Gemini voice+music, ffmpeg mux. Carries every trap (fake-4K capture, audio `asplit`/loudnorm-pumping/sidechain music-cut, Lyria-mpeg, atempo-fit, multi-source timeline, ClickHouse `/play` console, encode CRF). |
+| `project-validator` | `wherehouse-validate`, `wherehouse-categories` | Prove features are real vs the LIVE system (per-tool SQL, headless `chat.agent()` run, no-fakery audit, hard rules); add/remove/audit queryable trades (the Overture-vs-friendly naming trap, "make it shine"). |
+
+Skills are also user-invocable (`/wherehouse-video` etc.). The detail lives in the SKILL.md; the
+agents are the operators that load them.
 
 ## CI and releases
 
