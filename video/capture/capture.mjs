@@ -393,11 +393,14 @@ async function zoomToCatchment(page, { duration = 2400 } = {}) {
     .evaluate((dur) => {
       const m = window.__whMap;
       if (!m) return false;
-      const src = m.getSource("catchment");
-      const data = src && src._data;
-      if (!data || !data.features || !data.features.length) return false;
+      // querySourceFeatures, NOT the private src._data: a MapLibre GeoJSONSource does not keep the
+      // FeatureCollection on _data.features after setData (verified live — _data has no .features),
+      // whereas querySourceFeatures returns the loaded features (2,236 for a dense pick) and a tight,
+      // correct bbox. The whole web is in view at the city zoom this runs from, so all edges return.
+      const feats = m.querySourceFeatures("catchment");
+      if (!feats || !feats.length) return false;
       let minX = 180, minY = 90, maxX = -180, maxY = -90;
-      for (const f of data.features) {
+      for (const f of feats) {
         const coords = (f.geometry && f.geometry.coordinates) || [];
         for (const c of coords) {
           if (c[0] < minX) minX = c[0];
