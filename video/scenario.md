@@ -25,7 +25,9 @@ real duration of each beat and Remotion syncs captions to that.
 ### 2 · The map assembles itself (0:12–0:38)
 - **Screen:** the omnibar dissolves into the map dashboard. Layers arrive in waves —
   1,460 competitor dots, then the opportunity choropleth fades in, then three ranked pins
-  drop, then a 10-minute walk catchment blooms around the winner, then a momentum sparkline.
+  drop, then the 10-minute walk catchment draws itself around the winner as a web of streets —
+  each edge coloured by walk-time, bright at the doorstep, fading to the 10-minute fringe — then
+  a momentum sparkline.
   The "Agent runs" rail on the left ticks through each tool as it fires.
 - **Caption:** `The map is the answer — assembling live from ClickHouse.`
 - **VO:** "No wall of text. A Trigger-dot-dev agent calls ClickHouse, tool by tool, and each
