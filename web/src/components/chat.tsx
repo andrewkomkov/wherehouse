@@ -3501,7 +3501,7 @@ const CSS = `
 .wh-dot{width:7px;height:7px;border-radius:50%;background:${C.accent};animation:wh-pulse 1s infinite}
 .wh-pop{position:absolute;left:318px;top:150px;z-index:20;width:266px;padding:15px;border-radius:13px;
   background:rgba(9,11,14,.94);backdrop-filter:blur(14px);box-shadow:0 24px 60px -20px rgba(0,0,0,.8)}
-.wh-ask{width:100%;padding:10px 40px 10px 12px;border-radius:9px;background:rgba(255,255,255,.05);
+.wh-ask{width:100%;box-sizing:border-box;padding:10px 40px 10px 12px;border-radius:9px;background:rgba(255,255,255,.05);
   border:1px solid rgba(255,255,255,.1);color:${C.text};font-family:${MONO};font-size:12.5px;outline:none}
 .wh-go{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:28px;height:28px;border:none;
   border-radius:7px;background:${C.accent};color:#062018;font-weight:700;cursor:pointer;font-size:14px}
