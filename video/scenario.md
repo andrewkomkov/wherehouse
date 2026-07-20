@@ -37,8 +37,13 @@ real duration of each beat and Remotion syncs captions to that.
 
 ### 3 · Why this pick (0:38–1:05)
 - **Screen:** focus the #1 pick. The provenance panel opens: **Lichtenrade** — thousands of
-  residents, zero bakeries in the surrounding cells, a measured 10-minute walk reach. Hover
-  the score breakdown (demand × headroom × accessibility).
+  residents, zero bakeries in the surrounding cells, a measured 10-minute walk reach. Then the
+  **camera pushes in** — a real MapLibre `fitBounds` on the spider-web (not a video zoom, so
+  streets and labels stay crisp and the side rails never clip) — until the reachable **street
+  network fills the frame**: the exact 10-minute walk, edge by edge, coloured bright at the
+  doorstep and fading to the fringe. This is the shot that makes the VO's "measured against the
+  street network" *literal* — you SEE the streets it was measured on. Hold, then ease back to the
+  city for the next beat.
 - **Caption:** `Lichtenrade — real name, real numbers, nothing invented.`
 - **VO:** "The winner is Lichtenrade — a dense residential edge with no bakery nearby. The name
   is resolved from real boundary geometry, the numbers are the ones the score ranked on, and

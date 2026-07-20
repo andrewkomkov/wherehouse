@@ -61,9 +61,18 @@ CENTERED zoom clips *both* edges; even `s≈1.10` shaves the first 1–2 charact
 rail. Anchoring left (`fx→0`) saves the left rail but eats the right one — you cannot keep both while
 zooming, and a zoom subtle enough to keep both (`s≤~1.01`) is invisible. **So the decision was: no zoom.**
 Keep all beats at `s0=s1=1.0` (static full-frame); the movement in the film is the app assembling itself
-plus the smooth cross-beat fades. If you re-introduce zoom, it clips a rail — get the owner's sign-off
-first. (Changing only the zoom to 1.0 needs a re-RENDER + re-mix, NOT a re-capture — the footage is
+plus the smooth cross-beat fades. If you re-introduce the REMOTION zoom, it clips a rail — get the owner's
+sign-off first. (Changing only the zoom to 1.0 needs a re-RENDER + re-mix, NOT a re-capture — the footage is
 unchanged; `remotion render` + `mix.py`.)
+
+**The deep zoom into the pick DOES exist now — but it is a real MAP camera move at CAPTURE time, not the
+Remotion scale.** `capture.mjs`'s `focusTopPick` drives `window.__whMap.fitBounds(<catchment bounds>)` (the
+map handle exposed in `chat.tsx`) to push the live MapLibre camera into the top pick's spider-web, hold, then
+`easeTo` back to the city. Because only the map VIEWPORT moves — not the whole 4K frame — the two side rails
+and the captions never clip, which is exactly the constraint that killed the Remotion Ken-Burns. Streets and
+labels re-render crisp (vector zoom, not upscaled pixels). This is baked into `screen.webm`, so changing it
+needs a **re-CAPTURE** (unlike the Remotion zoom). Tune the push in `zoomToCatchment`/`focusTopPick`
+(duration, `maxZoom`, hold). It no-ops safely if `__whMap` or the `catchment` source isn't present.
 
 ### 3. Captions and the brand bug are OUTPUT-resolution overlays — never zoom them
 Only the `<OffthreadVideo>` gets the zoom transform. Captions (`Captions.tsx`) and `BrandBug` sit on
