@@ -128,6 +128,10 @@ const WAVES = [
   { key: "read", label: "Read the question", source: "agent" },
   { key: "competitors", label: "Competitor dots", source: "ClickHouse", tool: "tool-findCompetitors", layer: "competitors" },
   { key: "opportunity", label: "Opportunity surface", source: "ClickHouse", tool: "tool-scoreArea", layer: "opportunity" },
+  // Standalone, optional layer — only ever a wave when the user asked for it (the run-step builder
+  // filters to tools that actually ran), so a normal answer never shows this step. It rides here so
+  // Replay repaints it when it IS present (replayFrom walks WAVES to find each layer's snapshot).
+  { key: "capacity", label: "Built capacity", source: "ClickHouse", tool: "tool-showBuiltCapacity", layer: "capacity" },
   { key: "picks", label: "Rank top 3", source: "agent", tool: "tool-rankSites", layer: "picks" },
   { key: "catchment", label: "Walk catchment", source: "Valhalla", tool: "tool-showCatchment", layer: "catchment" },
   { key: "caption", label: "Caption", source: "agent" },
@@ -272,7 +276,24 @@ async function fetchSavedSitesFromClickHouse(): Promise<SavedSiteRow[]> {
   return body.data;
 }
 
-const LAYER_IDS: LayerId[] = ["opportunity", "competitors", "picks", "catchment", "saved"];
+const LAYER_IDS: LayerId[] = ["opportunity", "capacity", "competitors", "picks", "catchment", "saved"];
+
+// The built-capacity choropleth's amber ramp — kept deliberately clear of the cool teal opportunity
+// surface, the warm-RED competitor dots (#ff6b57) and the pick yellow (#FAFF69) so a lit-up cell
+// reads unambiguously as "built-up", not as any of the three data meanings already on the map. Warm
+// amber → orange, sequential, low→high floor-area. The stops are scaled at paint time to THIS
+// layer's own p95 floor (it arrives via the handle path, so the browser holds the only copy of the
+// values), never a hardcoded m2 constant.
+const CAPACITY_FILL_OPACITY = 0.66;
+// Fractions of the layer's p95 floor at which each amber stop lands. Ascending; the 0 stop is fully
+// transparent so a near-empty cell fades out rather than tinting the whole city.
+const CAPACITY_RAMP: { at: number; color: string }[] = [
+  { at: 0, color: "rgba(70,44,12,0)" },
+  { at: 0.15, color: "rgba(150,96,30,0.34)" },
+  { at: 0.4, color: "rgba(200,124,36,0.56)" },
+  { at: 0.7, color: "rgba(240,158,48,0.74)" },
+  { at: 1, color: "rgba(255,196,120,0.9)" },
+];
 
 // The teal band for the walk catchment. Kept clear of the competitor warm and the pick yellow so
 // the shape reads as "the walk", not a data value: a low-alpha fill under a crisp accent outline.
@@ -464,6 +485,27 @@ function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
           "line-opacity": 0,
         },
       });
+      // The built-capacity choropleth (standalone, default OFF): a fill drawn OVER the opportunity
+      // surface — it is the layer the user explicitly turns on to read building density, so when
+      // both are on it reads on top. `fill-color` is set per-paint from this layer's own p95 floor
+      // (the amber ramp); it starts transparent and reveals hex-by-hex like the opportunity surface,
+      // so it too reads as "computed", not "an image loaded".
+      m.addLayer({
+        id: "capacity",
+        type: "fill",
+        source: "capacity",
+        paint: { "fill-color": "rgba(0,0,0,0)", "fill-opacity": 0 },
+      });
+      m.addLayer({
+        id: "capacity-line",
+        type: "line",
+        source: "capacity",
+        paint: {
+          "line-color": "rgba(255,196,120,0.16)",
+          "line-width": 0.5,
+          "line-opacity": 0,
+        },
+      });
       // The walk catchment: fill + outline, drawn OVER the opportunity surface and UNDER the
       // competitor dots and the pick markers, so nothing the contour encloses is hidden by it
       // (contract: under picks, over opportunity). Colour is set once here; the reveal only moves
@@ -560,6 +602,9 @@ export function Chat() {
     // The compare flow's saved-site layer (feature 003): the user's saved sites as hollow rings,
     // emitted by compareSavedSites and toggled independently below.
     saved: true,
+    // The standalone built-capacity choropleth: default OFF so it never clutters the where-to-open
+    // answer. It appears only when the user toggles it on or the agent calls showBuiltCapacity.
+    capacity: false,
   });
   const [selected, setSelected] = useState<number | null>(null);
   /**
@@ -920,6 +965,48 @@ export function Chat() {
         return;
       }
 
+      if (layer === "capacity") {
+        src!.setData(fc);
+        const base = visible.capacity ? CAPACITY_FILL_OPACITY : 0;
+        // Derive the amber ramp from THIS layer's own distribution. Capacity always arrives via the
+        // handle path (~584 KiB), so the browser holds the only copy of the floor values and must
+        // compute the scale itself — there is no server-side p95 riding the part (unlike the GAP
+        // surface's `scale`). p95, not max, so one outlier tower block cannot wash the rest of the
+        // city to the bottom of the ramp. greatest(...,1) guards the divide for an empty layer.
+        const floors = (fc.features as GeoJSON.Feature<GeoJSON.Geometry, { floor?: number }>[])
+          .map((f) => f.properties?.floor)
+          .filter((v): v is number => typeof v === "number")
+          .sort((a, b) => a - b);
+        const p95 = floors.length
+          ? floors[Math.min(floors.length - 1, Math.floor(floors.length * 0.95))]
+          : 1;
+        const top = Math.max(p95, 1);
+        // Stops scaled to the p95; a cell at or above p95 sits at the top of the ramp (clamped by
+        // MapLibre's interpolate). Colour is fixed here, so the reveal below only moves opacity.
+        m.setPaintProperty("capacity", "fill-color", [
+          "interpolate",
+          ["linear"],
+          ["get", "floor"],
+          ...CAPACITY_RAMP.flatMap((s) => [s.at * top, s.color]),
+        ] as unknown as maplibregl.ExpressionSpecification);
+        m.setPaintProperty("capacity-line", "line-opacity", visible.capacity ? 1 : 0);
+        // Per-hex reveal outward from the centre, exactly as the opportunity surface — each hex is
+        // one row the AggregatingMergeTree rolled up, so the wave reads as "computed".
+        await tween(
+          680,
+          (t) => {
+            const front = t * 1.1;
+            m.setPaintProperty("capacity", "fill-opacity", [
+              "interpolate", ["linear"], ["get", "dist"], Math.max(0, front - 0.08), base, front, 0,
+            ]);
+          },
+          cancelled,
+        );
+        if (cancelled()) return;
+        m.setPaintProperty("capacity", "fill-opacity", base);
+        return;
+      }
+
       if (layer === "catchment") {
         src!.setData(fc);
         const fillOn = visible.catchment ? CATCHMENT_FILL_OPACITY : 0;
@@ -1096,6 +1183,12 @@ export function Chat() {
     m.setPaintProperty("opportunity", "fill-opacity", visible.opportunity ? 0.72 : 0);
     m.setPaintProperty("opportunity-line", "line-opacity", visible.opportunity ? 1 : 0);
     m.setPaintProperty("competitors", "circle-opacity", visible.competitors ? 0.82 : 0);
+    // Independent toggle: touches only the capacity layer's own fill/outline. Its fill-color (the
+    // amber ramp) was set at paint time from the layer's own p95 and is left untouched here.
+    if (m.getLayer("capacity")) {
+      m.setPaintProperty("capacity", "fill-opacity", visible.capacity ? CAPACITY_FILL_OPACITY : 0);
+      m.setPaintProperty("capacity-line", "line-opacity", visible.capacity ? 1 : 0);
+    }
     // Independent toggle: this touches only the catchment's own layers, never another (FR-005).
     if (m.getLayer("catchment")) {
       m.setPaintProperty("catchment", "fill-opacity", visible.catchment ? CATCHMENT_FILL_OPACITY : 0);
@@ -1126,6 +1219,10 @@ export function Chat() {
       m.setPaintProperty("opportunity-line", "line-opacity", 0);
       m.setPaintProperty("competitors", "circle-opacity", 0);
       m.setPaintProperty("competitors", "circle-radius", 0);
+      if (m.getLayer("capacity")) {
+        m.setPaintProperty("capacity", "fill-opacity", 0);
+        m.setPaintProperty("capacity-line", "line-opacity", 0);
+      }
       if (m.getLayer("catchment")) {
         m.setPaintProperty("catchment", "fill-opacity", 0);
         m.setPaintProperty("catchment-line", "line-opacity", 0);
@@ -1205,6 +1302,10 @@ export function Chat() {
   // otherwise — contract), so `latest.has("catchment")` IS the measured-contour test; the toggle
   // gates whether it is actually visible (FR-003). `notMeasured` is per-answer, from ClickHouse.
   const catchmentShown = latest.has("catchment") && visible.catchment;
+  // The standalone built-capacity choropleth is on screen only when its layer landed AND its toggle
+  // is on (default off). Same live-state discipline as catchmentShown — the legend never keys a row
+  // to a layer that is not actually painted.
+  const capacityShown = latest.has("capacity") && visible.capacity;
   const notMeasured = latest.get("opportunity")?.notMeasured;
 
   // ---- KPI strip (feature 006, now the map's dashboard header) ---------------------------
@@ -1428,6 +1529,10 @@ export function Chat() {
       m.setPaintProperty("opportunity-line", "line-opacity", 0);
       m.setPaintProperty("competitors", "circle-opacity", 0);
       m.setPaintProperty("competitors", "circle-radius", 0);
+      if (m.getLayer("capacity")) {
+        m.setPaintProperty("capacity", "fill-opacity", 0);
+        m.setPaintProperty("capacity-line", "line-opacity", 0);
+      }
       if (m.getLayer("catchment")) {
         m.setPaintProperty("catchment", "fill-opacity", 0);
         m.setPaintProperty("catchment-line", "line-opacity", 0);
@@ -2275,6 +2380,7 @@ export function Chat() {
               and visible, so the key never describes something that is not there. */}
           {((latest.has("opportunity") && visible.opportunity) ||
             (latest.has("competitors") && visible.competitors) ||
+            capacityShown ||
             catchmentShown) && (
             <div className="wh-legend">
               {latest.has("opportunity") && visible.opportunity && (
@@ -2288,6 +2394,21 @@ export function Chat() {
                     }}
                   />
                   <span style={{ color: "#9aa4ad" }}>opportunity · est.</span>
+                </div>
+              )}
+              {capacityShown && (
+                <div className="wh-legend-row">
+                  <span
+                    style={{
+                      width: 34,
+                      height: 7,
+                      borderRadius: 3,
+                      background: "linear-gradient(90deg,rgba(150,96,30,.34),#c87c24,#f09e30,#ffc478)",
+                    }}
+                  />
+                  {/* "est." because floor-area is footprint × storeys and storeys are only ~24%
+                      surveyed (see 011_overture_demand.sql) — a relative ramp, not a survey. */}
+                  <span style={{ color: "#9aa4ad" }}>built capacity · est.</span>
                 </div>
               )}
               {latest.has("competitors") && visible.competitors && (
@@ -2602,6 +2723,23 @@ export function Chat() {
                   height: 9,
                   borderRadius: 3,
                   background: "linear-gradient(90deg,rgba(20,44,66,.5),#1c5a7a,#2b9fae,#57d8cf,#8ff2dd)",
+                }}
+              />
+            }
+          />
+          {/* Standalone built-capacity choropleth — default OFF, so it starts dimmed. The amber
+              swatch mirrors the map ramp and keeps clear of the opportunity teal below it. */}
+          <Toggle
+            on={visible.capacity}
+            onClick={() => setVisible((v) => ({ ...v, capacity: !v.capacity }))}
+            label="Built capacity"
+            swatch={
+              <div
+                style={{
+                  width: 44,
+                  height: 9,
+                  borderRadius: 3,
+                  background: "linear-gradient(90deg,rgba(150,96,30,.34),#c87c24,#f09e30,#ffc478)",
                 }}
               />
             }

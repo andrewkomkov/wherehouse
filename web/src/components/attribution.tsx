@@ -30,7 +30,7 @@ export function Attribution() {
       <A href="https://data.humdata.org/dataset/kontur-population-dataset">Kontur</A> (
       <A href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</A>), 2023-11-01 snapshot
       <br />
-      Places &amp; districts © <A href="https://overturemaps.org">Overture Maps</A> · Basemap ©{" "}
+      Places, buildings &amp; districts © <A href="https://overturemaps.org">Overture Maps</A> · Basemap ©{" "}
       <A href="https://openstreetmap.org">OpenStreetMap</A>,{" "}
       <A href="https://protomaps.com">Protomaps</A>
     </div>

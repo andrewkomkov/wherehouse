@@ -31,7 +31,12 @@ import type { ClickHouseClient } from "@clickhouse/client";
 import type { Scale } from "../lib/types";
 export type { Scale };
 
-export type LayerId = "competitors" | "opportunity" | "picks" | "catchment" | "saved";
+// `capacity` is a STANDALONE display layer over the Overture building stock (built floor-area per
+// H3 cell, straight from the geo.cell_capacity AggregatingMergeTree MV). It rides the same emit
+// path as every other layer — always the handle path in practice (~584 KiB Berlin) — but it is NOT
+// part of the GAP answer: it defaults OFF and only appears when the user toggles it or the agent
+// calls showBuiltCapacity.
+export type LayerId = "competitors" | "opportunity" | "picks" | "catchment" | "saved" | "capacity";
 
 export type BBox = [number, number, number, number];
 

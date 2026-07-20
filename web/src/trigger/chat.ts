@@ -11,6 +11,8 @@ import {
   isCity,
   competitorsSql,
   bboxSql,
+  capacitySql,
+  capacityStatsSql,
   choroplethSql,
   choroplethStatsSql,
   rankSql,
@@ -253,6 +255,59 @@ const scoreArea = tool({
     });
 
     return { cellCount: s?.cellCount ?? 0, topGap: s?.topGap ?? 0, medianGap: s?.medianGap ?? 0 };
+  },
+});
+
+/**
+ * A STANDALONE display layer: built floor-area per H3 cell, straight from the geo.cell_capacity
+ * AggregatingMergeTree MV (~1.57M Overture footprints rolled up). It showcases the dataset and the
+ * MV directly on the map and is NOT part of the answer flow — it does not touch the GAP score (the
+ * score's own built-capacity demand term lives in scoreArea's candidateCells and is separate). It
+ * defaults OFF in the UI, so this only runs when the user asks to see built density.
+ *
+ * City-only input: `category` is irrelevant to building stock, so unlike the other tools this one
+ * takes just the city rather than the shared `target` — there is no trade to resolve. ADR-001: the
+ * model gets only { cellCount }; the ~584 KiB GeoJSON rides the handle path to the browser, which
+ * derives the amber ramp from the layer's own p95 floor.
+ */
+const showBuiltCapacity = tool({
+  description:
+    "Show how built-up an area is: a choropleth of built floor-area (building capacity) per cell, straight from the Overture building stock. Use when the user asks to show built density, building capacity, or how built-up an area is. This is a standalone map layer, not part of the where-to-open flow.",
+  inputSchema: z.object({ city: target.shape.city }),
+  execute: async ({ city }) => {
+    const c = checkCity(city);
+    if (!c.ok) return c.err;
+
+    const [geojsonText, stats] = await Promise.all([
+      queryText(capacitySql(c.city)),
+      queryRows<{
+        cellCount: number;
+        minLon: number;
+        minLat: number;
+        maxLon: number;
+        maxLat: number;
+      }>(capacityStatsSql(c.city)),
+    ]);
+
+    const s = stats[0];
+    const cellCount = s?.cellCount ?? 0;
+    if (cellCount === 0) {
+      return { error: "no building capacity data for that city", city: c.city };
+    }
+
+    // Carry a bbox so a standalone call (no competitors layer flown first) still frames the city.
+    const bbox: BBox | undefined =
+      s && s.minLon != null ? [s.minLon, s.minLat, s.maxLon, s.maxLat] : undefined;
+
+    await emitLayer(clickhouse, {
+      layer: "capacity",
+      label: `built capacity across ${c.city}`,
+      geojsonText,
+      rowCount: cellCount,
+      bbox,
+    });
+
+    return { cellCount };
   },
 });
 
@@ -668,9 +723,9 @@ const clamp01to100 = (v: number): number => Math.max(0, Math.min(100, v));
 
 const setLayer = tool({
   description:
-    "Show or hide one map layer. Use when the user asks to hide/show/toggle a layer — e.g. 'hide the competitors', 'show the walk catchment again'. Layers: opportunity (the choropleth), competitors, picks, catchment (the 10-min walk), saved.",
+    "Show or hide one map layer. Use when the user asks to hide/show/toggle a layer — e.g. 'hide the competitors', 'show the walk catchment again', 'hide the built capacity'. Layers: opportunity (the choropleth), competitors, picks, catchment (the 10-min walk), saved, capacity (built floor-area per cell).",
   inputSchema: z.object({
-    layer: z.enum(["opportunity", "competitors", "picks", "catchment", "saved"]),
+    layer: z.enum(["opportunity", "competitors", "picks", "catchment", "saved", "capacity"]),
     on: z.boolean().describe("true to show the layer, false to hide it"),
   }),
   execute: async ({ layer, on }) => emitUi({ action: "setLayer", layer, on }),
@@ -726,6 +781,7 @@ const exportReport = tool({
 const tools = {
   findCompetitors,
   scoreArea,
+  showBuiltCapacity,
   rankSites,
   showCatchment,
   saveSite,
@@ -754,6 +810,10 @@ export const SYSTEM_PROMPT = [
   // request has a tool, and a UI or rebuild request must NEVER resolve as a pure-text turn.
   "When the user asks to change what is on screen, DO IT with a tool — never answer such a request with prose alone. A request to change the view or the answer must never be a text-only reply.",
   "A new trade or a new city is a full REBUILD: call findCompetitors, then scoreArea, then rankSites, then showCatchment for the new (city, trade). 'what about gyms?', 'show me pharmacies instead', 'and in Amsterdam?' are rebuilds, not remarks.",
+  // showBuiltCapacity is a STANDALONE display layer (built floor-area per cell, from the Overture
+  // building stock), NOT part of the where-to-open sequence and NOT part of the score. Call it only
+  // when the user explicitly asks about built density; it takes just the city.
+  "When the user asks to show built density, building capacity, or how built-up an area is, call showBuiltCapacity for that city — it is a standalone building-stock layer, not part of the where-to-open flow.",
   "For a request about the CURRENT view, call the matching UI tool: 'hide/show the competitors (or any layer)' -> setLayer; 'weight walkability/demand/residents/competition higher or to the max' -> reweight (only those three factors — demand, competition, accessibility; the demand slider blends residents + built capacity + address density; there is NO rent); 'show me the worst/best place' -> highlightExtreme; 'open pick 2' or 'show the #1 pick' -> focusPick; 'go back to the bakery answer' or an earlier run -> reviewRun; 'export/download/share a report or PDF' -> exportReport.",
   "After acting you MAY add at most ONE short caption sentence — never instead of acting, only after. If a request would change the screen and you only wrote text, you failed it.",
   "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",

@@ -353,6 +353,69 @@ export function affinityForCellsSql(
 }
 
 /**
+ * The built-capacity choropleth as one GeoJSON string — a STANDALONE display layer over the
+ * Overture building stock, NOT an input to the GAP score (that blend lives in candidateCells' `cap`
+ * CTE and is unchanged). This just paints what geo.cell_capacity holds so the AggregatingMergeTree
+ * MV and the ~1.57M-footprint dataset are visible on the map in their own right.
+ *
+ * Reads the incremental capacity rollup directly: sumMerge collapses the AggregateFunction(sum)
+ * state to a plain floor-area total per cell, countMerge the AggregateFunction(count) to a building
+ * count. GROUP BY h3_8 is mandatory, not cosmetic — an AggregatingMergeTree keeps one *State per
+ * part until a background merge, so reading without the merge combinators + GROUP BY would return
+ * partial states, not the rolled-up number. No bbox filter: cell_capacity is already scoped to the
+ * three cities at load and partitioned by `city`, so `WHERE city = …` prunes to exactly one city's
+ * cells with no geometry work (traps #2: never filter on geometry).
+ *
+ * `floor` is emitted as an integer m2 (toUInt64(round(...))) — it is an ESTIMATE (footprint ×
+ * storeys, storeys only ~24% surveyed; see 011_overture_demand.sql), so sub-m2 precision would be
+ * false precision. The browser derives the amber ramp from this layer's OWN p95 floor (it arrives
+ * via the handle path, so the client holds the only copy of the values — see chat.tsx).
+ *
+ * ⚠️ `h3ToGeoBoundary` returns (lat, lon) and GeoJSON wants [lon, lat] — hence the `v.2, v.1` swap
+ * on every vertex, exactly as choroplethSql does. The ring is closed by repeating the first vertex.
+ *
+ * Measured live 2026-07-20 (Cloud 26.4), berlin: 2,390 cells · 584 KiB ⇒ always the handle path.
+ * max floor 1,497,946 m2, p95 624,083 m2. amsterdam 776 cells, belgrade 1,084.
+ */
+export function capacitySql(city: CityName): string {
+  const c = city.replace(/'/g, "''");
+  return `WITH cap AS (
+    SELECT h3_8,
+           sumMerge(floor_area_m2) AS floor_area,
+           countMerge(buildings)   AS buildings
+    FROM geo.cell_capacity
+    WHERE city = '${c}'
+    GROUP BY h3_8
+  )
+  SELECT concat('{"type":"FeatureCollection","features":[',
+    arrayStringConcat(groupArray(concat(
+      '{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[',
+      arrayStringConcat(arrayMap(
+        v -> concat('[', toString(round(v.2, 5)), ',', toString(round(v.1, 5)), ']'),
+        arrayPushBack(h3ToGeoBoundary(h3_8), h3ToGeoBoundary(h3_8)[1])
+      ), ','),
+      ']]},"properties":{"floor":', toString(toUInt64(round(floor_area))),
+      ',"buildings":', toString(buildings), '}}')), ','),
+    ']}')
+  FROM cap`;
+}
+
+/**
+ * Cheap stats for the capacity layer — cell count for the model (ADR-001: never the geometry) plus
+ * a bounding box so a STANDALONE showBuiltCapacity call (no competitors layer to have flown first)
+ * can still frame the city. The bbox is the min/max of the cells' H3 centres — h3ToGeo is LAT-FIRST,
+ * so `.2` is longitude and `.1` latitude (the same swap as everywhere in this file). GROUP BY h3_8
+ * so an unmerged AggregatingMergeTree part cannot count a cell twice.
+ */
+export function capacityStatsSql(city: CityName): string {
+  const c = city.replace(/'/g, "''");
+  return `SELECT count() AS cellCount,
+    round(min(h3ToGeo(h3_8).2), 5) AS minLon, round(min(h3ToGeo(h3_8).1), 5) AS minLat,
+    round(max(h3ToGeo(h3_8).2), 5) AS maxLon, round(max(h3ToGeo(h3_8).1), 5) AS maxLat
+  FROM (SELECT h3_8 FROM geo.cell_capacity WHERE city = '${c}' GROUP BY h3_8)`;
+}
+
+/**
  * Competitor points as one GeoJSON string.
  *
  * Measured, Berlin bakeries: 1,460 rows · 430 ms · 175 KiB ⇒ inline. Berlin food & drink is
