@@ -18,8 +18,10 @@
 set -euo pipefail
 
 CITY="${1:?usage: build-city.sh <berlin|amsterdam|belgrade>}"
-SPEED="${SPEED:-1.12}"
+SPEED="${SPEED:-1.10}"
 APP_URL="${APP_URL:-https://app.slim-shaggy.com}"
+# REMIX=1 skips the (balance-spending) capture+render and re-mixes the saved silent render
+# out/render-<city>.mp4 with the current VO — for a VO-text / speed tweak with the SAME footage.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # video/
 cd "$ROOT"
 
@@ -44,32 +46,44 @@ export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
 CA="$ROOT/../.secrets/pg-ca.crt"
 psql_do() { psql "${POSTGRES_URL}&sslmode=verify-full&sslrootcert=${CA}" -v ON_ERROR_STOP=1 "$@"; }
 
-# --- 1. saved-sites hygiene: make the "YOUR SAVED SITES" panel city-consistent -------------------
-# The demo user u1's saves are shared across cities; unscoped, a Berlin cut shows Belgrade's
-# Rakovica and Amsterdam's Nieuw-West. Berlin's beat sheet uses focusTopPick (no auto-save) so it
-# needs its own Berlin saves left in place; Amsterdam/Belgrade use focusTopPickAndSave, which
-# creates their save live during the capture, so they start from empty.
-log "saved-sites hygiene for $CITY"
-if [ "$CITY" = "berlin" ]; then
-  psql_do -c "DELETE FROM public.saved_sites WHERE user_id='u1' AND label IN ('Rakovica','Nieuw-West, Amsterdam')"
+render="out/render-${CITY}.mp4"   # saved silent render, so a VO-only tweak can re-mix for free
+
+if [ -n "${REMIX:-}" ]; then
+  # --- REMIX: reuse the saved silent render, skip the balance-spending capture+render ------------
+  [ -f "$render" ] || die "REMIX set but no saved render at $render — run a full build for $CITY first"
+  log "REMIX — reusing saved render $render (no capture, no render)"
 else
-  psql_do -c "DELETE FROM public.saved_sites WHERE user_id='u1'"
+  # --- 1. saved-sites hygiene: make the "YOUR SAVED SITES" panel city-consistent -----------------
+  # The demo user u1's saves are shared across cities; unscoped, a Berlin cut shows Belgrade's
+  # Rakovica and Amsterdam's Nieuw-West. Berlin's beat sheet uses focusTopPick (no auto-save) so it
+  # needs its own Berlin saves left in place; Amsterdam/Belgrade use focusTopPickAndSave, which
+  # creates their save live during the capture, so they start from empty.
+  log "saved-sites hygiene for $CITY"
+  if [ "$CITY" = "berlin" ]; then
+    psql_do -c "DELETE FROM public.saved_sites WHERE user_id='u1' AND label IN ('Rakovica','Nieuw-West, Amsterdam')"
+  else
+    psql_do -c "DELETE FROM public.saved_sites WHERE user_id='u1'"
+  fi
+  log "waiting 15s for ClickPipes CDC to carry that to ClickHouse before the compare beat re-scores…"
+  sleep 15
+
+  # --- 2. stage the city's beat sheet as the active beats.json (build.sh reads beats.json) -------
+  cp "$BEATS" beats.json
+  log "staged $BEATS -> beats.json"
+
+  # --- 3. capture + convert + render against the deployed app -----------------------------------
+  APP_URL="$APP_URL" ./build.sh
+  cp remotion/out/wherehouse-demo.mp4 "$render"          # keep the silent render for future re-mix
+  cp out/timings.json "out/timings.${CITY}.json"          # its measured windows, for future re-mix
 fi
-log "waiting 15s for ClickPipes CDC to carry that to ClickHouse before the compare beat re-scores…"
-sleep 15
-
-# --- 2. stage the city's beat sheet as the active beats.json (build.sh reads beats.json) ---------
-cp "$BEATS" beats.json
-log "staged $BEATS -> beats.json"
-
-# --- 3. capture + convert + render against the deployed app -------------------------------------
-APP_URL="$APP_URL" ./build.sh
 
 # --- 4. mix this city's VO onto the render (city-aware via WH_VO_* overrides) --------------------
+# mix.py reads the measured windows from out/timings.json — in REMIX mode restore this city's.
+[ -n "${REMIX:-}" ] && cp "out/timings.${CITY}.json" out/timings.json
 mixed="out/wherehouse-${CITY}-mixed.mp4"
 log "mixing $CITY VO ($VODIR) + music"
 WH_VO_DIR="$ROOT/voiceover/out/$VODIR" WH_VO_MANIFEST="$VOMAN" \
-  voiceover/.venv/bin/python voiceover/mix.py remotion/out/wherehouse-demo.mp4 "$mixed"
+  voiceover/.venv/bin/python voiceover/mix.py "$render" "$mixed"
 
 # --- 5. speed the whole cut up a touch (video + audio together, kept in sync) --------------------
 final="out/wherehouse-${CITY}-final.mp4"

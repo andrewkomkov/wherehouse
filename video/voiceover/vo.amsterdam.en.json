@@ -9,7 +9,7 @@
     },
     {
       "id": "assemble",
-      "text": "No wall of text. A Trigger dot dev agent calls ClickHouse tool by tool, and each result draws itself onto the map — competitors, an opportunity surface, the three best sites, a walking catchment measured on real streets."
+      "text": "No wall of text. A Trigger dot dev agent calls ClickHouse, tool by tool, and each result paints itself onto the map — rivals, opportunity, three top sites, a real walk catchment."
     },
     {
       "id": "pick",
@@ -17,23 +17,23 @@
     },
     {
       "id": "reweight",
-      "text": "You don't just read the answer — you argue with it. Ask for more walkability, and the agent moves the sliders. The map re-scores live."
+      "text": "You don't read the answer — you argue with it. Ask for walkability; the map re-scores live."
     },
     {
       "id": "scale",
-      "text": "And it scales. Every food and drink venue in Amsterdam — thousands of points. Too large for the chat stream's one-megabyte limit, so it never touches it. It lands in ClickHouse, and the browser reads it straight from the database."
+      "text": "And it scales. Food and drink across Amsterdam — thousands of points, too big for the chat stream's one-megabyte cap. So it never touches it: it lands in ClickHouse, read straight from the browser."
     },
     {
       "id": "compare",
-      "text": "Save a site to Postgres. Change data capture streams it into ClickHouse — re-scored against seventy-five million live points."
+      "text": "Save a site — change data capture streams it into ClickHouse, against seventy-five million live points."
     },
     {
       "id": "console",
-      "text": "One last thing — there is no web server. This entire app is a row in ClickHouse. Every file, a row you can query."
+      "text": "One last thing — no web server. The whole app is a row in ClickHouse. Every file, a row."
     },
     {
       "id": "close",
-      "text": "The agent runs on Trigger dot dev's cloud. Ask a question, get a map — not a wall of text. That's WhereHouse."
+      "text": "The agent runs on Trigger dot dev's cloud. Ask a question, get a live map — not a wall of text. Millions of points, drawn, not written. That's WhereHouse."
     }
   ]
 }
