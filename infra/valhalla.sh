@@ -13,6 +13,16 @@
 #   ./infra/valhalla.sh down         # stop and remove the container
 #   ./infra/valhalla.sh all berlin amsterdam belgrade
 #
+# The "spider web" variant (Valhalla /expansion -> geo.isochrone_edges, render-only). Same
+# graph, same origins, same search_cutoff as the isochrones — the reachable STREET EDGES, not
+# the filled blob. See db/clickhouse/012_isochrone_edges.sql and
+# docs/architecture/spider-web-catchment.md.
+#
+#   ./infra/valhalla.sh expansion         # build + batch + load + verify (rollback on fail)
+#   ./infra/valhalla.sh expansion-batch   # compute expansions -> local TSV (cached per city)
+#   ./infra/valhalla.sh expansion-load    # apply 012 schema + insert + verify
+#   ./infra/valhalla.sh expansion-verify  # sceptic checks against the loaded edges
+#
 # Idempotent at every stage. Measured for Berlin on 2026-07-17: the graph build is the only
 # slow part at 510 s; the batch is 18 s and the load 28 s. Each stage caches its artifact, so
 # a re-run skips straight past. Delete the artifact to redo that stage.
@@ -756,6 +766,343 @@ spotcheck() {
     ) AS b"
 }
 
+# --- spider web (Valhalla /expansion) ----------------------------------------
+#
+# The alternative catchment LOOK: the reachable STREET EDGES from an origin, not the filled
+# blob. Same graph, same origins, same search_cutoff=150 as the isochrones above — a spider web
+# and a blob for the SAME cell are two views of ONE routing run and must not diverge. Loads
+# geo.isochrone_edges (db/clickhouse/012_isochrone_edges.sql), which is RENDER-ONLY: nothing
+# joins it, the scoring path still uses geo.isochrone_cells. This is purely the visual variant.
+#
+# PROVEN LIVE 2026-07-20 against the cached Berlin graph (Valhalla 3.5.1): POST /expansion with
+# action=isochrone returns a GeoJSON FeatureCollection, one LineString Feature per graph edge,
+# each with an accumulated `duration` (seconds) and `distance` (metres) — the literal tree of
+# edges Dijkstra settled. See the header of 012 for the request/response shapes.
+#
+# ONE CONTOUR, NOT THREE. action=isochrone is one unidirectional Dijkstra, so every edge already
+# carries its own accumulated duration; a single time=10 request returns every edge reachable in
+# 10 min and the 5-min sub-web is just `duration <= 300`. We match the 10-min catchment the rest
+# of the product draws/scores (scoring.ts joins isochrone_cells at minutes=10). Verified: a
+# standalone time=5 gave 972 edges, time=10 filtered to duration<=300 gave 892 — the ~8% gap is
+# boundary edges settled-vs-reached, cosmetically irrelevant for a painted line layer.
+
+# Compute one expansion per candidate cell. Output: TSV of (origin_h3_9, duration_s, dist_m, geom).
+# Structurally the sibling of batch(): same candidate_cells(), same 127.0.0.1/IPv6 and canary
+# traps, same skip-is-data / outage-is-not-a-skip discipline. It does NOT reuse the isochrone
+# denoise/lobe handling — an edge is an edge, there are no lobes to keep or drop.
+expand_batch() {
+    local city="$1"
+    local out="$WORK/$city/expansion.tsv"
+
+    if [[ -s "$out" ]]; then
+        ok "expansion cached: $(wc -l <"$out" | tr -d ' ') edges ($(du -h "$out" | cut -f1))"
+        return
+    fi
+
+    serve "$city"
+    log "collecting candidate cells for $city..."
+    local cells="$WORK/$city/cells.txt"
+    candidate_cells "$city" >"$cells"
+    log "$(wc -l <"$cells" | tr -d ' ') candidate res-9 cells"
+
+    log "computing 10-min pedestrian expansions (8 threads)..."
+    local t0 t1
+    t0="$(date +%s)"
+    # Same python3 -c "$(cat …)" form as batch() — a bare heredoc steals stdin (lib.sh's own
+    # note records this biting status.sh). File paths come in as argv.
+    python3 -c "$(cat <<'PY'
+import concurrent.futures as cf
+import json, sys, urllib.request, urllib.error
+
+cells_file, out_file, port = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# 127.0.0.1, NOT localhost — Valhalla's prime_server answers on IPv4 only and Python prefers
+# ::1, so `localhost` dies with ConnectionResetError while curl's Happy Eyeballs hides it. This
+# is documented at length in batch() above; the same trap, the same fix.
+URL = f"http://127.0.0.1:{port}/expansion"
+
+
+class Unreachable(Exception):
+    """Valhalla is not answering — an infrastructure failure, never a data one."""
+
+
+def one(rec):
+    h3, lat, lon = rec
+    body = json.dumps({
+        "locations": [{
+            "lat": lat, "lon": lon,
+            # search_cutoff=150 — IDENTICAL to the isochrone batch, and load-bearing for the
+            # same reason: without it Valhalla snaps a lake/park/rail-yard centroid to a road
+            # kilometres away and returns that road's web under our cell id. The spider web and
+            # the blob MUST snap the same way or they describe different places. See batch().
+            "search_cutoff": 150,
+        }],
+        "costing": "pedestrian",
+        # ONE contour. The duration property gives the within-web gradient for free.
+        "contours": [{"time": 10}],
+        "action": "isochrone",
+        # Accumulated seconds + metres per edge. Everything else the docs offer (edge_id,
+        # pred_edge_id, edge_status, expansion_type) is debug detail we don't render — and each
+        # property adds >=10% to the response, which is already the heaviest thing we store.
+        "expansion_properties": ["duration", "distance"],
+        # Halves the output: an undirected street is two directed edges, keep the cheaper one.
+        # Measured central Berlin 10-min: 1.06 MiB with, 2.1 MiB without.
+        "skip_opposites": True,
+        # Each edge once, keeping the higher edge-state. Belt-and-braces with skip_opposites.
+        "dedupe": True,
+    }).encode()
+    req = urllib.request.Request(URL, data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            fc = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # 4xx IS the data answer: no walkable edge within 150 m (lake, runway, rail yard). The
+        # exact legitimate-skip case the isochrone batch handles — Kontur says people live in
+        # the res-8 parent, it does not promise all 7 res-9 children touch a footpath.
+        if 400 <= e.code < 500:
+            return []
+        raise Unreachable(f"HTTP {e.code}") from e
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        # Connection reset / timeout / unparseable body = the ENGINE failing, not the data.
+        # Never launder an outage into a "skip" — that is the constitution II defect the
+        # isochrone batch's first version shipped (15,820 fake "no walkable edge" skips).
+        raise Unreachable(str(e)) from e
+
+    rows = []
+    for feat in fc.get("features", []):
+        geom = feat.get("geometry", {})
+        if geom.get("type") != "LineString":
+            continue
+        coords = geom.get("coordinates")
+        if not coords or len(coords) < 2:
+            continue
+        props = feat.get("properties", {})
+        dur = int(round(props.get("duration", 0)))
+        dist = int(round(props.get("distance", 0)))
+        # UInt16 ceilings. A 10-min pedestrian edge never approaches 65,535 s / 65,535 m; clamp
+        # rather than overflow silently if a future costing change ever produced a monster.
+        dur = min(dur, 65535)
+        dist = min(dist, 65535)
+        # GeoJSON is [lon,lat]. Stored verbatim, no swap (012's coordinate-order block). Rounded
+        # to 5 decimals (~1.1 m) — imperceptible on a rendered street, and it trims the single
+        # biggest column. Compact separators: the TSV field must hold no tab and no newline.
+        g = json.dumps([[round(c[0], 5), round(c[1], 5)] for c in coords],
+                       separators=(",", ":"))
+        rows.append((h3, dur, dist, g))
+    return rows
+
+
+recs = []
+with open(cells_file) as f:
+    for line in f:
+        parts = line.split()
+        if len(parts) == 3:
+            recs.append((int(parts[0]), float(parts[1]), float(parts[2])))
+
+# Canary before the fleet — fail NOW if Valhalla is unreachable or the graph misses this bbox,
+# not in N minutes and never as a wall of fake skips. Same shape as batch()'s canary.
+try:
+    if not one(recs[0]):
+        probe = next((r for r in recs[1:200] if one(r)), None)
+        if probe is None:
+            raise SystemExit(
+                "canary: the first 200 populated cells all report no walkable edge. "
+                "The graph almost certainly does not cover this bbox.")
+except Unreachable as e:
+    raise SystemExit(f"canary: valhalla unreachable ({e}) — the batch would produce nothing")
+
+written = miss = origins = 0
+with open(out_file + ".part", "w") as out, cf.ThreadPoolExecutor(max_workers=8) as ex:
+    try:
+        for i, rows in enumerate(ex.map(one, recs), 1):
+            if not rows:
+                miss += 1
+            else:
+                origins += 1
+            for h3, dur, dist, g in rows:
+                out.write(f"{h3}\t{dur}\t{dist}\t{g}\n")
+                written += 1
+            if i % 500 == 0:
+                print(f"\r  {i}/{len(recs)} cells, {origins} webs, {written} edges, "
+                      f"{miss} skipped", end="", file=sys.stderr, flush=True)
+    except Unreachable as e:
+        raise SystemExit(f"\nvalhalla died mid-batch ({e}) — refusing to write a partial file "
+                         f"that would look complete. Re-run 'expansion'.")
+
+pct = 100.0 * miss / len(recs)
+print(f"\r  {len(recs)} cells, {origins} webs, {written} edges, "
+      f"{miss} skipped ({pct:.1f}% — no footpath within 150 m)",
+      file=sys.stderr)
+
+# Belt and braces (the guard that caught the IPv6 bug on the isochrone side; it stays).
+if written == 0:
+    raise SystemExit("no expansion edges produced — is the graph built for this bbox?")
+# ~38% skipped is EXPECTED and correct with search_cutoff=150 — it is the SAME origin set as the
+# isochrones, so the skip rate must match theirs (berlin ~36.9%). The guard catches a broken
+# graph, not a normal run.
+if pct > 60:
+    raise SystemExit(f"{miss}/{len(recs)} ({pct:.1f}%) cells had no footpath within 150 m. "
+                     f"Expected ~38% (must match the isochrone skip rate for the same origins). "
+                     f"That is a broken or mis-located graph. Refusing to load.")
+PY
+)" "$cells" "$out" "$PORT"
+    mv "$out.part" "$out"
+    t1="$(date +%s)"
+
+    local n
+    n="$(wc -l <"$out" | tr -d ' ')"
+    ok "expansion: $n edges in $((t1 - t0))s ($(du -h "$out" | cut -f1))"
+}
+
+# Load the edges. Idempotent by DROP PARTITION, exactly like load(). No derive step — this table
+# is render-only, there is no isochrone_cells analogue to rebuild from it.
+expand_load() {
+    local city="$1"
+    local tsv="$WORK/$city/expansion.tsv"
+    [[ -s "$tsv" ]] || die "no expansion output for $city — run 'expansion' first"
+
+    log "applying db/clickhouse/012_isochrone_edges.sql"
+    apply_sql_file db/clickhouse/012_isochrone_edges.sql
+
+    log "replacing partition '$city'"
+    ch "ALTER TABLE geo.isochrone_edges DROP PARTITION '$city'" >/dev/null
+
+    log "inserting edges..."
+    ch_insert_file "
+        INSERT INTO geo.isochrone_edges (origin_h3_9, duration_s, dist_m, geom, city)
+        SELECT origin_h3_9, duration_s, dist_m, geom, '$city'
+        FROM input('origin_h3_9 UInt64, duration_s UInt16, dist_m UInt16, geom String')
+        FORMAT TSV" "$tsv"
+
+    ok "loaded: $(ch "SELECT count() FROM geo.isochrone_edges WHERE city='$city'") edges across \
+$(ch "SELECT uniqExact(origin_h3_9) FROM geo.isochrone_edges WHERE city='$city'") origins"
+
+    if ! expand_verify "$city"; then
+        warn "verification FAILED for '$city' — dropping the partition just loaded."
+        warn "A spider web placed in the wrong city is a lie that survives until someone looks;"
+        warn "an empty partition is an obvious outage. Loud and empty beats quiet and wrong."
+        ch "ALTER TABLE geo.isochrone_edges DROP PARTITION '$city'" >/dev/null
+        die "expansion load rolled back for '$city' — table left clean"
+    fi
+}
+
+# Verify like a sceptic. Every H3/geo bug this project shipped produced a healthy row count, so a
+# count proves only that the loader ran. Each check is written so the failure it hunts would FAIL
+# it (constitution II): a lat/lon swap moves the geometry out of the city, a snapped origin puts
+# its web nowhere near itself, 'auto' costing blows the reach ceiling.
+expand_verify() {
+    local city="$1" lat_min lat_max lon_min lon_max
+    read -r lat_min lat_max lon_min lon_max <<<"$(bbox_of "$city")"
+
+    local fails=0
+    check() {  # check <label> <sql returning 1 for pass>
+        local label="$1" sql="$2" got
+        got="$(ch "$sql" | tr -d '[:space:]')"
+        if [[ "$got" == "1" ]]; then ok "$label"; else
+            warn "FAIL: $label (got '$got')"; fails=$((fails + 1))
+        fi
+    }
+
+    log "--- expansion: $city ---"
+
+    # First vertex of each edge as [lon,lat]. JSONExtract parses the stored coordinates array;
+    # [1] is the first point, .1 lon .2 lat. This is the ONLY place the geom text is decoded.
+    ch "SELECT
+          round(avg(JSONExtract(geom, 'Array(Array(Float64))')[1].2), 4) AS avg_lat,
+          round(avg(JSONExtract(geom, 'Array(Array(Float64))')[1].1), 4) AS avg_lon,
+          count()
+        FROM geo.isochrone_edges WHERE city = '$city'"
+
+    # 1. THE LAT/LON TRAP. A swapped geom lands every edge in the Arabian Sea and still counts
+    #    fine. The bbox check is what catches it — the same check that guards the isochrones.
+    check "every edge's first vertex is inside the $city bbox" "
+        SELECT countIf(
+                 JSONExtract(geom, 'Array(Array(Float64))')[1].2 NOT BETWEEN $lat_min - 0.05 AND $lat_max + 0.05
+              OR JSONExtract(geom, 'Array(Array(Float64))')[1].1 NOT BETWEEN $lon_min - 0.05 AND $lon_max + 0.05
+               ) = 0
+        FROM geo.isochrone_edges WHERE city = '$city'"
+
+    # 2. THE WEB TOUCHES ITS OWN ORIGIN — the analogue of the isochrones' single most valuable
+    #    check ("every origin is inside its own catchment"). search_cutoff=150 snaps the origin
+    #    to an edge within 150 m, and a res-9 cell is ~180 m across, so the NEAREST edge vertex
+    #    of an origin's own web must sit within ~250 m of that origin's centroid. If it does not,
+    #    the web belongs to somewhere else — a snapped origin, the exact failure the cutoff
+    #    exists to prevent. Checks the min-distance per origin, so a single misplaced web fails.
+    check "every origin's nearest edge vertex is within 250 m of the origin (no snap drift)" "
+        SELECT countIf(min_d > 250) = 0
+        FROM (
+            SELECT origin_h3_9,
+                   min(geoDistance(
+                     h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
+                     JSONExtract(geom, 'Array(Array(Float64))')[1].1,
+                     JSONExtract(geom, 'Array(Array(Float64))')[1].2)) AS min_d
+            FROM geo.isochrone_edges WHERE city = '$city'
+            GROUP BY origin_h3_9
+        )"
+
+    # 3. THE REACH CEILING. accumulated network distance to any edge in a 10-min pedestrian web.
+    #    A ~5.0 km/h walk covers ~833 m of PATH in 10 min; network-accumulated distance runs a
+    #    little longer with detours, and the ferry outlier (006's note) stretches one corner of
+    #    Berlin. 2,500 m is a deliberately GENEROUS gross-error catch — it fires on a lat/lon
+    #    swap or 'auto' costing (which the isochrone verify measured at 14 km reach), not on
+    #    honest walking. NOTE: this bound is provisional until the full batch runs; the isochrone
+    #    verify tightened its ceilings from measured p99.9 (see check 5 there) and the execution
+    #    step should do the same here rather than trust this hand-picked number.
+    check "no edge exceeds a 2,500 m accumulated-distance ceiling (gross-error catch)" "
+        SELECT countIf(dist_m > 2500) = 0
+        FROM geo.isochrone_edges WHERE city = '$city'"
+
+    # 4. THE WEB AGREES WITH THE BLOB. This table and geo.isochrones are two views of the SAME
+    #    10-min routing run, so the origins that produced a web must be ~the origins that
+    #    produced a 10-min contour. Not identical (a settled-vs-reached boundary origin can
+    #    differ), but a large divergence means one of the two batches used a different origin
+    #    set, cutoff or graph. Assert >=90% of edge-origins also have a 10-min isochrone.
+    #    Skipped automatically if the isochrones are not loaded — this is a cross-table sanity
+    #    check, not a hard dependency of the edges themselves.
+    if [[ "$(ch "SELECT count() FROM geo.isochrones WHERE city='$city' AND minutes=10" | tr -d '[:space:]')" != "0" ]]; then
+        check "edge origins agree with the 10-min isochrone origins (>=90% overlap)" "
+            SELECT (countIf(has_iso) / count()) >= 0.90
+            FROM (
+                SELECT e.origin_h3_9,
+                       e.origin_h3_9 IN (
+                           SELECT origin_h3_9 FROM geo.isochrones
+                           WHERE city = '$city' AND minutes = 10
+                       ) AS has_iso
+                FROM (SELECT DISTINCT origin_h3_9 FROM geo.isochrone_edges WHERE city = '$city') AS e
+            )"
+    else
+        warn "geo.isochrones has no 10-min $city rows — skipping the web-vs-blob overlap check"
+    fi
+
+    # 5. THE DURATION GRADIENT IS REAL. The whole point of storing duration is the within-web
+    #    colour ramp, so it must actually vary: an origin's edges must span from near-0 (the edge
+    #    it stands on) out toward the 10-min fringe. If duration were constant or absent, the
+    #    render would be one flat colour and this table would be pointless. Assert the median
+    #    origin's edges cover a range of at least 300 s.
+    check "the median origin's edges span >=300 s of duration (the gradient exists)" "
+        SELECT quantile(0.5)(max_d - min_d) >= 300
+        FROM (
+            SELECT origin_h3_9, min(duration_s) AS min_d, max(duration_s) AS max_d
+            FROM geo.isochrone_edges WHERE city = '$city'
+            GROUP BY origin_h3_9
+        )"
+
+    # Shape summary a human can eyeball: edges per web, and its span.
+    ch "SELECT
+          round(avg(edges), 1)        AS avg_edges_per_web,
+          max(edges)                  AS max_edges_per_web,
+          round(avg(span_s))          AS avg_span_seconds
+        FROM (SELECT origin_h3_9, count() AS edges, max(duration_s) - min(duration_s) AS span_s
+              FROM geo.isochrone_edges WHERE city = '$city' GROUP BY origin_h3_9)"
+
+    if [[ $fails -ne 0 ]]; then
+        warn "$fails expansion verification check(s) FAILED for $city"
+        return 1
+    fi
+    ok "$city: all expansion checks passed"
+}
+
 # --- main --------------------------------------------------------------------
 
 CMD="${1:-all}"
@@ -770,6 +1117,15 @@ case "$CMD" in
     verify) for c in "${CITIES[@]}"; do
                 verify "$c" || die "verification FAILED for $c — the loaded data is not trustworthy"
                 spotcheck "$c"
+            done ;;
+    # The spider web (Valhalla /expansion). Same graph and origins as the isochrones, a separate
+    # table (geo.isochrone_edges, render-only). `expansion` does the whole build->batch->load->
+    # verify-or-rollback cycle; the sub-stages exist for the same caching/debug reasons as above.
+    expansion)      for c in "${CITIES[@]}"; do build "$c"; expand_batch "$c"; expand_load "$c"; done; down; ok "container removed" ;;
+    expansion-batch) for c in "${CITIES[@]}"; do build "$c"; expand_batch "$c"; done; down ;;
+    expansion-load)  for c in "${CITIES[@]}"; do expand_load "$c"; done ;;
+    expansion-verify) for c in "${CITIES[@]}"; do
+                expand_verify "$c" || die "expansion verification FAILED for $c — the loaded data is not trustworthy"
             done ;;
     down)   down; ok "container removed" ;;
     all)
