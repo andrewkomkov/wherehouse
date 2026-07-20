@@ -578,6 +578,12 @@ function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
       // are only ever three of them.
 
       map.current = m;
+      // Expose the map for the demo-video capture (video/capture/capture.mjs), so the Playwright
+      // shoot can drive a real, smooth camera push into the top pick's spider-web via easeTo/
+      // fitBounds — a genuine MapLibre zoom (vector tiles re-render crisp; only the map viewport
+      // moves, so the side rails and captions never clip, unlike a post-hoc Ken-Burns scale). A
+      // read-only handle; nothing in the app reads it back.
+      (window as unknown as { __whMap?: maplibregl.Map }).__whMap = m;
       setReady(true);
     });
 

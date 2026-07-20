@@ -346,6 +346,80 @@ async function waitIdle(page, timeout = 60000) {
     .catch(() => {});
 }
 
+/** Read the live map camera so it can be restored after a cinematic push-in. Returns null if the
+ *  app hasn't exposed its MapLibre handle (window.__whMap, set in chat.tsx). */
+async function saveCamera(page) {
+  return page
+    .evaluate(() => {
+      const m = window.__whMap;
+      if (!m) return null;
+      const c = m.getCenter();
+      return { lng: c.lng, lat: c.lat, zoom: m.getZoom(), bearing: m.getBearing(), pitch: m.getPitch() };
+    })
+    .catch(() => null);
+}
+
+/** Ease the live map camera back to a saved state (used to pull out of the pick before the next
+ *  city-wide beat). */
+async function restoreCamera(page, cam, duration = 1600) {
+  if (!cam) return;
+  await page
+    .evaluate(
+      ({ cam, dur }) => {
+        const m = window.__whMap;
+        if (!m) return;
+        m.easeTo({
+          center: [cam.lng, cam.lat],
+          zoom: cam.zoom,
+          bearing: cam.bearing,
+          pitch: cam.pitch,
+          duration: dur,
+          essential: true,
+        });
+      },
+      { cam, dur: duration },
+    )
+    .catch(() => {});
+  await sleep(duration + 150);
+}
+
+/** The money shot: a real MapLibre push-in that FRAMES the top pick's spider-web (the reachable
+ *  street network), by fitting the camera to the `catchment` source's bounds. This is a genuine
+ *  vector zoom — streets and labels re-render crisp, and only the MAP viewport moves, so the two
+ *  side rails and the captions never clip (the reason the Remotion Ken-Burns scale had to stay
+ *  off — see the video skill's gotcha #2). No-ops cleanly if the handle or the layer isn't there. */
+async function zoomToCatchment(page, { duration = 2400 } = {}) {
+  const ok = await page
+    .evaluate((dur) => {
+      const m = window.__whMap;
+      if (!m) return false;
+      const src = m.getSource("catchment");
+      const data = src && src._data;
+      if (!data || !data.features || !data.features.length) return false;
+      let minX = 180, minY = 90, maxX = -180, maxY = -90;
+      for (const f of data.features) {
+        const coords = (f.geometry && f.geometry.coordinates) || [];
+        for (const c of coords) {
+          if (c[0] < minX) minX = c[0];
+          if (c[0] > maxX) maxX = c[0];
+          if (c[1] < minY) minY = c[1];
+          if (c[1] > maxY) maxY = c[1];
+        }
+      }
+      if (minX > maxX) return false;
+      m.fitBounds([[minX, minY], [maxX, maxY]], {
+        padding: 90,
+        maxZoom: 15.5,
+        duration: dur,
+        essential: true,
+      });
+      return true;
+    }, duration)
+    .catch(() => false);
+  if (ok) await sleep(duration + 200);
+  return ok;
+}
+
 function makeActions(page) {
   return {
     // Beat 1 — type the question into the landing omnibar and submit.
@@ -363,12 +437,17 @@ function makeActions(page) {
     },
     // Beat 3 — focus the #1 pick's provenance. Click the top row in the runs/picks rail.
     focusTopPick: async (b) => {
+      const cam = await saveCamera(page);
       const btn = page.locator("text=/why the #?1 pick|#1 pick/i").first();
       // Short timeout: if the chip is present but not actionable, we don't want the default 30s
       // hang eating the beat — just move on and hold the map.
       if (await btn.count()) await btn.click({ timeout: 3500 }).catch(() => {});
-      // Fallback: click the brightest pin near the map centre-right if the chip isn't present.
-      await sleep(b.targetMs - 3000);
+      await sleep(600);
+      // Push the real camera into the spider-web, hold on the reachable streets, then pull back
+      // out to the city so the next (city-wide) beat starts framed correctly.
+      const zoomed = await zoomToCatchment(page, { duration: 2400 });
+      await sleep(Math.max(0, b.targetMs - 5600));
+      if (zoomed) await restoreCamera(page, cam, 1500);
     },
     // Same as focusTopPick, but ALSO saves the #1 pick first (a real `.wh-save` click, so it goes
     // to Postgres via saveSiteAction — no agent round-trip needed). Used by cities that have no
@@ -381,12 +460,16 @@ function makeActions(page) {
       // take saved it), the save button sits in its "saved" state and is not actionable — the
       // default 30s click timeout would otherwise blow the beat out to ~54s. Capped + caught, it
       // no-ops in a few seconds and the beat holds the pick view as intended.
+      const cam = await saveCamera(page);
       const saveBtn = page.locator(".wh-save").first();
       if (await saveBtn.count()) await saveBtn.click({ timeout: 3500 }).catch(() => {});
       await sleep(700);
       const btn = page.locator("text=/why the #?1 pick|#1 pick/i").first();
       if (await btn.count()) await btn.click({ timeout: 3500 }).catch(() => {});
-      await sleep(Math.max(0, b.targetMs - 3700));
+      await sleep(600);
+      const zoomed = await zoomToCatchment(page, { duration: 2400 });
+      await sleep(Math.max(0, b.targetMs - 6300));
+      if (zoomed) await restoreCamera(page, cam, 1500);
     },
     // Generic agent ask through the docked composer.
     ask: async (b) => {
