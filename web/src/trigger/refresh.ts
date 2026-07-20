@@ -30,6 +30,11 @@ const clickhouse = createClient({
   url: process.env.CLICKHOUSE_URL,
   username: process.env.CLICKHOUSE_USER,
   password: process.env.CLICKHOUSE_PASSWORD,
+  // The buildings INSERT decodes ~890k Berlin geometries — well past the client's 30s default
+  // request timeout, even though the server-side SETTINGS max_execution_time allows it. Raise the
+  // client timeout to match and stream progress headers so the connection is not dropped mid-decode.
+  request_timeout: 600_000,
+  clickhouse_settings: { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: "50000" },
 });
 
 // Pinned exactly as the bash loaders pin it — a silently newer release would move footprint counts
