@@ -24,7 +24,11 @@ from google.genai import types
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "out"
-VO_DIR = OUT / "vo"
+# City-aware overrides (default = Berlin, so the single-city path is unchanged when unset):
+# WH_VO_SPEC picks which vo.<city>.en.json to read, WH_VO_SUBDIR names the output wav dir.
+VO_SPEC = ROOT / os.environ.get("WH_VO_SPEC", "vo.en.json")
+VO_DIR = OUT / os.environ.get("WH_VO_SUBDIR", "vo")
+VO_MANIFEST = OUT / os.environ.get("WH_VO_MANIFEST", "vo.manifest.json")
 
 
 def parse_audio_mime_type(mime_type: str) -> dict:
@@ -88,12 +92,12 @@ def wav_seconds(path: Path) -> float:
 
 
 def gen_vo(client, only=None):
-    spec = json.loads((ROOT / "vo.en.json").read_text())
+    spec = json.loads(VO_SPEC.read_text())
     VO_DIR.mkdir(parents=True, exist_ok=True)
     style = spec.get("style", "")
     # Preserve any already-generated clips not being regenerated, so the manifest stays complete.
     existing = {}
-    mpath = OUT / "vo.manifest.json"
+    mpath = VO_MANIFEST
     if mpath.exists():
         existing = {c["id"]: c for c in json.loads(mpath.read_text()).get("clips", [])}
     manifest = []
@@ -126,7 +130,7 @@ def gen_vo(client, only=None):
         dur = wav_seconds(out)
         print(f"  saved {out.name} ({dur}s, {len(data)//1024} KiB)")
         manifest.append({"id": bid, "file": f"vo/{bid}.wav", "seconds": dur})
-    (OUT / "vo.manifest.json").write_text(json.dumps({"clips": manifest}, indent=2))
+    VO_MANIFEST.write_text(json.dumps({"clips": manifest}, indent=2))
     total = round(sum(c["seconds"] for c in manifest), 1)
     print(f"✓ voiceover: {len(manifest)} clips, {total}s total -> {OUT/'vo.manifest.json'}")
 

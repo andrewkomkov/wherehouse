@@ -14,14 +14,17 @@ then muxes the result onto the captioned MP4 with a straight video copy.
 Needs ffmpeg + ffprobe. VO/music come from ./out (run generate.py first); timings from ../out.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent          # video/voiceover
 VIDEO_OUT_DIR = ROOT.parent / "out"             # video/out (capture outputs)
-VO_DIR = ROOT / "out" / "vo"
-MANIFEST = ROOT / "out" / "vo.manifest.json"
+# City-aware: WH_VO_DIR selects the per-city wav dir (out/vo-amsterdam, out/vo-belgrade);
+# unset keeps the Berlin default so the single-city path is untouched.
+VO_DIR = Path(os.environ["WH_VO_DIR"]) if os.environ.get("WH_VO_DIR") else ROOT / "out" / "vo"
+MANIFEST = ROOT / "out" / os.environ.get("WH_VO_MANIFEST", "vo.manifest.json")
 MUSIC = ROOT / "out" / "music.wav"
 GAP_MS = 450                                    # breath between spoken lines
 
