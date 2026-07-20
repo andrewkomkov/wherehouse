@@ -25,7 +25,7 @@
     },
     {
       "id": "compare",
-      "text": "Save a site — change data capture streams it into ClickHouse, against seventy-five million live points."
+      "text": "Save a site — Postgres to ClickHouse in seconds, against seventy-five million live points."
     },
     {
       "id": "console",
