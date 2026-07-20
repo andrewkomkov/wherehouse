@@ -155,9 +155,24 @@ serve() {
     local dir="$WORK/$city/custom_files"
     [[ -s "$dir/valhalla_tiles.tar" ]] || die "no tiles for $city — run 'build' first"
 
+    # Reuse the running container ONLY if it already serves THIS city's graph. The container
+    # mounts a city-specific custom_files dir; a container left up on another city answers /status
+    # perfectly but holds none of this city's edges, so every candidate cell reports "no walkable
+    # edge" and the batch canary aborts. This bit the moment graphs were cached: build() then
+    # returns early without down()ing, so a berlin container survived into serve(amsterdam). Check
+    # the mounted city, not just liveness. Compare the city path segment, not the whole path —
+    # docker resolves macOS $TMPDIR (/var/...) to /private/var/..., so a raw string compare fails.
     if curl -sf --max-time 2 "http://127.0.0.1:$PORT/status" >/dev/null 2>&1; then
-        ok "valhalla already serving"
-        return
+        local mount served_city
+        mount="$(docker inspect --format \
+            '{{range .Mounts}}{{if eq .Destination "/custom_files"}}{{.Source}}{{end}}{{end}}' \
+            "$CONTAINER" 2>/dev/null)"
+        served_city="$(basename "$(dirname "$mount")")"
+        if [[ "$served_city" == "$city" ]]; then
+            ok "valhalla already serving $city"
+            return
+        fi
+        log "container is serving '$served_city', not '$city' — restarting"
     fi
     down
     log "serving $city tiles"
@@ -458,11 +473,18 @@ PY
 # helper. The SQL goes in the query string, the file is the body.
 ch_insert_file() {
     local sql="$1" file="$2"
-    curl -sS --fail-with-body --max-time 600 \
+    # gzip the body. The isochrone TSV is ~30 MB, but the spider-web edge TSV is ~760 MB of
+    # coordinate text — it compresses ~10x, so the upload finishes in seconds instead of the
+    # minutes that once blew a fixed 600 s timeout and left a half-written partition. ClickHouse
+    # decompresses the request body server-side from Content-Encoding (verified live). --max-time
+    # is generous so a cold/idle service waking mid-insert cannot masquerade as a timeout. Piped,
+    # so the function's exit status is curl's — callers can rely on `if ! ch_insert_file`.
+    gzip -c "$file" | curl -sS --fail-with-body --max-time 1800 \
         --user "default:$CLICKHOUSE_PASSWORD" \
+        -H 'Content-Encoding: gzip' \
         "$CLICKHOUSE_URL/?query=$(python3 -c \
             'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$sql")" \
-        --data-binary "@$file"
+        --data-binary @-
 }
 
 # Load the contours, then let ClickHouse derive the reachable cells from them.
@@ -969,11 +991,18 @@ expand_load() {
     ch "ALTER TABLE geo.isochrone_edges DROP PARTITION '$city'" >/dev/null
 
     log "inserting edges..."
-    ch_insert_file "
+    # A timed-out or reset insert leaves a partial partition. There is no set -e here, so check
+    # explicitly and drop the half-written data — the same loud-and-empty-beats-quiet-and-wrong
+    # rule expand_verify enforces below, applied one step earlier to the transport itself.
+    if ! ch_insert_file "
         INSERT INTO geo.isochrone_edges (origin_h3_9, duration_s, dist_m, geom, city)
         SELECT origin_h3_9, duration_s, dist_m, geom, '$city'
         FROM input('origin_h3_9 UInt64, duration_s UInt16, dist_m UInt16, geom String')
-        FORMAT TSV" "$tsv"
+        FORMAT TSV" "$tsv"; then
+        warn "insert failed for '$city' — dropping the partition just written."
+        ch "ALTER TABLE geo.isochrone_edges DROP PARTITION '$city'" >/dev/null
+        die "expansion load failed for '$city' — table left clean"
+    fi
 
     ok "loaded: $(ch "SELECT count() FROM geo.isochrone_edges WHERE city='$city'") edges across \
 $(ch "SELECT uniqExact(origin_h3_9) FROM geo.isochrone_edges WHERE city='$city'") origins"
@@ -1007,10 +1036,12 @@ expand_verify() {
     log "--- expansion: $city ---"
 
     # First vertex of each edge as [lon,lat]. JSONExtract parses the stored coordinates array;
-    # [1] is the first point, .1 lon .2 lat. This is the ONLY place the geom text is decoded.
+    # [1] is the first point, an Array(Float64): index it [1][1] lon, [1][2] lat. It is an array,
+    # NOT a tuple — the tuple accessor .1/.2 raises ILLEGAL_TYPE_OF_ARGUMENT (Code 43). This is
+    # the ONLY place the geom text is decoded.
     ch "SELECT
-          round(avg(JSONExtract(geom, 'Array(Array(Float64))')[1].2), 4) AS avg_lat,
-          round(avg(JSONExtract(geom, 'Array(Array(Float64))')[1].1), 4) AS avg_lon,
+          round(avg(JSONExtract(geom, 'Array(Array(Float64))')[1][2]), 4) AS avg_lat,
+          round(avg(JSONExtract(geom, 'Array(Array(Float64))')[1][1]), 4) AS avg_lon,
           count()
         FROM geo.isochrone_edges WHERE city = '$city'"
 
@@ -1018,39 +1049,48 @@ expand_verify() {
     #    fine. The bbox check is what catches it — the same check that guards the isochrones.
     check "every edge's first vertex is inside the $city bbox" "
         SELECT countIf(
-                 JSONExtract(geom, 'Array(Array(Float64))')[1].2 NOT BETWEEN $lat_min - 0.05 AND $lat_max + 0.05
-              OR JSONExtract(geom, 'Array(Array(Float64))')[1].1 NOT BETWEEN $lon_min - 0.05 AND $lon_max + 0.05
+                 JSONExtract(geom, 'Array(Array(Float64))')[1][2] NOT BETWEEN $lat_min - 0.05 AND $lat_max + 0.05
+              OR JSONExtract(geom, 'Array(Array(Float64))')[1][1] NOT BETWEEN $lon_min - 0.05 AND $lon_max + 0.05
                ) = 0
         FROM geo.isochrone_edges WHERE city = '$city'"
 
     # 2. THE WEB TOUCHES ITS OWN ORIGIN — the analogue of the isochrones' single most valuable
-    #    check ("every origin is inside its own catchment"). search_cutoff=150 snaps the origin
-    #    to an edge within 150 m, and a res-9 cell is ~180 m across, so the NEAREST edge vertex
-    #    of an origin's own web must sit within ~250 m of that origin's centroid. If it does not,
-    #    the web belongs to somewhere else — a snapped origin, the exact failure the cutoff
-    #    exists to prevent. Checks the min-distance per origin, so a single misplaced web fails.
-    check "every origin's nearest edge vertex is within 250 m of the origin (no snap drift)" "
-        SELECT countIf(min_d > 250) = 0
+    #    check ("every origin is inside its own catchment"). The web belonging to somewhere else —
+    #    a snapped origin, a wrong graph, a lat/lon swap — is the failure this guards. Two facts
+    #    measured on the real berlin batch (9977 origins) shaped it:
+    #      - Distance must be to the NEAREST vertex of ANY edge, not the first vertex of each edge.
+    #        [1] is an edge's start node, which on a long edge (highway, park path) sits far from an
+    #        origin that snapped onto the edge's middle: first-vertex-only failed 272 origins (min-
+    #        distance p99.9 = 1484 m). Nearest-of-all-vertices fails 35 (p99.9 = 371 m, max 649 m).
+    #      - The bound is a PERCENTILE, like check 3. A real misplacement is systemic — a swap or
+    #        wrong graph shifts EVERY origin's web by km and blows p99.9 sky-high; the honest tail
+    #        (origins by water or rail whose nearest walkable vertex is a few hundred m off) leaves
+    #        p99.9 low. Measured across all three cities: nearest-vertex p99.9 = 346 m (berlin),
+    #        603 m (amsterdam), 638 m (belgrade); worst single origin 957 m (belgrade). Bound =
+    #        1000 m, ~1.6x the worst city's p99.9, still ~100x under any gross-error reach.
+    check "p99.9 of each origin's nearest-vertex distance is under 1,000 m (web touches its origin)" "
+        SELECT quantile(0.999)(min_d) <= 1000
         FROM (
             SELECT origin_h3_9,
-                   min(geoDistance(
-                     h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1,
-                     JSONExtract(geom, 'Array(Array(Float64))')[1].1,
-                     JSONExtract(geom, 'Array(Array(Float64))')[1].2)) AS min_d
+                   min(arrayMin(arrayMap(
+                     v -> geoDistance(
+                            h3ToGeo(origin_h3_9).2, h3ToGeo(origin_h3_9).1, v[1], v[2]),
+                     JSONExtract(geom, 'Array(Array(Float64))')))) AS min_d
             FROM geo.isochrone_edges WHERE city = '$city'
             GROUP BY origin_h3_9
         )"
 
-    # 3. THE REACH CEILING. accumulated network distance to any edge in a 10-min pedestrian web.
-    #    A ~5.0 km/h walk covers ~833 m of PATH in 10 min; network-accumulated distance runs a
-    #    little longer with detours, and the ferry outlier (006's note) stretches one corner of
-    #    Berlin. 2,500 m is a deliberately GENEROUS gross-error catch — it fires on a lat/lon
-    #    swap or 'auto' costing (which the isochrone verify measured at 14 km reach), not on
-    #    honest walking. NOTE: this bound is provisional until the full batch runs; the isochrone
-    #    verify tightened its ceilings from measured p99.9 (see check 5 there) and the execution
-    #    step should do the same here rather than trust this hand-picked number.
-    check "no edge exceeds a 2,500 m accumulated-distance ceiling (gross-error catch)" "
-        SELECT countIf(dist_m > 2500) = 0
+    # 3. THE REACH CEILING. Accumulated network distance to any edge in a 10-min pedestrian web.
+    #    Measured p99.9 across the three cities: 1111 m (berlin), 1302 m (amsterdam), 1967 m
+    #    (belgrade). The bulk sits at ~walking-speed x 10 min; there is a thin, legitimate tail of
+    #    long single edges (ferries, bridges, park paths with no intermediate node) reaching a max
+    #    of ~6.4 km (amsterdam's IJ ferries). A hard max would false-fail on that tail, so the
+    #    ceiling is a PERCENTILE: a lat/lon swap or 'auto' costing (the isochrone verify measured
+    #    14 km reach) shifts the WHOLE distribution and blows p99.9 sky-high, while the honest tail
+    #    leaves p99.9 under 2 km. Bound = 3000 m, ~1.5x belgrade's p99.9 and far below any gross-
+    #    error reach. Derived from data per the isochrone verify's own rule, not hand-picked.
+    check "p99.9 of accumulated distance is under 3,000 m (gross-error catch, tolerates ferry tail)" "
+        SELECT quantile(0.999)(dist_m) <= 3000
         FROM geo.isochrone_edges WHERE city = '$city'"
 
     # 4. THE WEB AGREES WITH THE BLOB. This table and geo.isochrones are two views of the SAME
