@@ -8,6 +8,18 @@
  * to fall back on if that erasure ever doesn't happen, so the type now lives here, with zero
  * dependencies, and both the client and the Worker's server-side code import from here.
  */
+/**
+ * The p95 scalars ClickHouse used to normalise demand/supply/accessibility for one query.
+ *
+ * The single source of truth: the server (`trigger/layers.ts`, on the `opportunity` map part) and
+ * the browser (`components/score.ts`, re-deriving the score for the sliders) both need this shape,
+ * and neither may import the other's module — layers.ts pulls in `@clickhouse/client` and the
+ * Trigger SDK, score.ts pulls in `maplibre-gl`, and this file must stay dependency-free so the
+ * client bundle never drags in either. It lived verbatim in both; defined once here so a factor
+ * added to one side cannot silently disagree with the other.
+ */
+export type Scale = { popP95: number; supP95: number; accP95: number };
+
 export type SavedSiteRow = {
   id: number;
   shortlist_id: number;

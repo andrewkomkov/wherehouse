@@ -24,26 +24,16 @@
 
 import { chat } from "@trigger.dev/sdk/ai";
 import type { ClickHouseClient } from "@clickhouse/client";
+// The `Scale` shape (the p95 scalars ClickHouse normalised with, shipped so the browser's sliders
+// re-derive the exact score the agent ranked on — see lib/types.ts) is defined once in the
+// dependency-free lib/types.ts and re-exported here so existing importers of `@/trigger/layers`
+// keep working. It used to be duplicated verbatim between here and components/score.ts.
+import type { Scale } from "../lib/types";
+export type { Scale };
 
 export type LayerId = "competitors" | "opportunity" | "picks" | "catchment" | "saved";
 
 export type BBox = [number, number, number, number];
-
-/**
- * The p95 scalars ClickHouse used to normalise demand and supply for THIS query.
- *
- * Sent because the browser re-derives the score client-side for the re-weight sliders, and it
- * must arrive at the number the agent already ranked on. It cannot recompute these: scoring.ts
- * derives them per city and category at query time (FR-007/FR-010), and a p95 recomputed in JS
- * is a *different* p95 — a different interpolation rule between the two straddling samples is
- * enough to move it. The map would then disagree with the ranking by a hair, silently, which is
- * the exact class of defect this project keeps getting bitten by.
- *
- * Three floats. Set only on the `opportunity` layer, which is the only one carrying scoreable cells.
- * `accP95` is the accessibility scalar, shipped for the same reason as the other two — the browser
- * re-derives the score and cannot recompute a p95 without drifting off the agent's ranking.
- */
-export type Scale = { popP95: number; supP95: number; accP95: number };
 
 export type MapData = {
   layer: LayerId;
@@ -51,6 +41,15 @@ export type MapData = {
   rowCount: number;
   bbox?: BBox;
   scale?: Scale;
+  /**
+   * A fresh token per emission, so the client can tell one write of a layer from the next even when
+   * the row count is identical. The client's paint dedup keyed on `rowCount` for inline layers, so
+   * two successive inline writes of the same id with the same count (e.g. `picks` is always 3) were
+   * seen as "already painted" and the new geometry never reached the map. `rev` is content-addressed
+   * at the emission level — a new write always repaints, a re-render never does. (The handle path was
+   * already safe: a new handle is minted per write.)
+   */
+  rev: string;
   /** Cells in this answer with no measured catchment. Only on the `opportunity` layer.
    *  Measured per city+category (berlin/bakery=830), never a constant. */
   notMeasured?: number;
@@ -99,6 +98,8 @@ export async function emitLayer(
 ): Promise<{ rowCount: number }> {
   const { layer, label, geojsonText, rowCount, bbox, scale, notMeasured } = opts;
   const bytes = Buffer.byteLength(geojsonText, "utf8");
+  // One token per emission — the client keys its paint dedup on it (see MapData.rev).
+  const rev = crypto.randomUUID();
 
   if (bytes <= INLINE_BUDGET_BYTES) {
     chat.response.write({
@@ -111,6 +112,7 @@ export async function emitLayer(
         layer,
         label,
         rowCount,
+        rev,
         bbox,
         scale,
         notMeasured,
@@ -128,7 +130,7 @@ export async function emitLayer(
     chat.response.write({
       type: "data-map",
       id: layer,
-      data: { layer, label, rowCount, bbox, scale, notMeasured, kind: "handle", handle } satisfies MapData,
+      data: { layer, label, rowCount, rev, bbox, scale, notMeasured, kind: "handle", handle } satisfies MapData,
     });
   }
 

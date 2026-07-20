@@ -1,4 +1,4 @@
-import { chat, ai } from "@trigger.dev/sdk/ai";
+import { chat } from "@trigger.dev/sdk/ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { streamText, stepCountIs, tool } from "ai";
 import type { InferUITools, UIMessage } from "ai";
@@ -184,25 +184,29 @@ const findCompetitors = tool({
 
     const [geojsonText, box] = await Promise.all([
       queryText(competitorsSql(c.city, cats)),
-      queryRows<{ minLon: number; minLat: number; maxLon: number; maxLat: number }>(
+      queryRows<{ minLon: number; minLat: number; maxLon: number; maxLat: number; n: number }>(
         bboxSql(c.city, cats),
       ),
     ]);
 
-    const features = JSON.parse(geojsonText).features as unknown[];
-    if (features.length === 0) {
+    // Row count comes from the bbox query's `count()` (bboxSql), not from parsing the GeoJSON.
+    // The old JSON.parse here duplicated the parse emitLayer does on the inline path and, worse,
+    // parsed the whole FeatureCollection on the handle path too — a payload the stream sends
+    // verbatim and never needs decoded. `n` is free (that query already scans these rows).
+    const b = box[0];
+    const rowCount = b?.n ?? 0;
+    if (rowCount === 0) {
       return { error: "no data for that category", city: c.city, category };
     }
 
-    const b = box[0];
     const bbox: BBox | undefined =
       b && b.minLon != null ? [b.minLon, b.minLat, b.maxLon, b.maxLat] : undefined;
 
     return await emitLayer(clickhouse, {
       layer: "competitors",
-      label: `${features.length.toLocaleString("en")} ${category} in ${c.city}`,
+      label: `${rowCount.toLocaleString("en")} ${category} in ${c.city}`,
       geojsonText,
-      rowCount: features.length,
+      rowCount,
       bbox,
     });
   },
@@ -451,15 +455,22 @@ const showCatchment = tool({
 const DEMO_USER_ID = "u1";
 
 /**
- * The shortlist's chat scope when we cannot recover the real chatId.
+ * The fixed chat scope every shortlist is keyed on — BOTH save paths, deliberately.
  *
- * `ai.chatContext()` reads it from the run's tool metadata, which is only populated when a tool
- * runs as a subtask (`ai.toolExecute`). These tools run INLINE in the agent run, so it returns
- * undefined and this constant is what upsertShortlist keys on. The one visible effect: every save
- * for the same (user, city, business_type) lands under ONE shortlist regardless of conversation,
- * which is the right behaviour for a single-user demo and wrong for multi-tenant — a real product
- * would thread the chatId through. Not invented data, just a coarser grouping. (constitution II —
- * stated as the limitation it is, not dressed up as per-chat isolation we did not build.)
+ * A shortlist is keyed on (chat_id, user_id, city, business_type). The two save paths must agree on
+ * chat_id or the same (user, city, trade) splits across two shortlist rows (there is no unique
+ * constraint to catch it): the agent tool below and the Worker's `handleSaveSite`
+ * (infra/app-worker/src/postgres.ts) — the map-click save — must both use THIS constant. If the
+ * Worker keyed on the browser session's real chatId (as it once did) while the agent tool used this
+ * scope, a click-save and an agent-save for one trade would land under different shortlists.
+ *
+ * Using a constant is also the only thing that actually works for the agent tool: `ai.chatContext()`
+ * populates chatId only for a tool run as a subtask (`ai.toolExecute`), and these tools run INLINE
+ * in the agent run, so it returns undefined regardless. The visible effect is that every save for
+ * one (user, city, business_type) lands under ONE shortlist regardless of conversation — the right
+ * behaviour for a single-user demo, wrong for multi-tenant. A real product would thread a real
+ * chatId through BOTH paths together. (constitution II — stated as the limitation it is, not dressed
+ * up as per-chat isolation we did not build.)
  */
 const SAVE_CHAT_SCOPE = "wherehouse-demo";
 
@@ -487,9 +498,11 @@ const saveSite = tool({
     }
 
     const label = placeName(pick) ?? "saved site";
-    const chatId = ai.chatContext()?.chatId ?? SAVE_CHAT_SCOPE;
+    // The fixed scope, NOT the run's chatId — see SAVE_CHAT_SCOPE. This is the same key the Worker's
+    // handleSaveSite uses, so an agent save and a map-click save for one (user, city, trade) share
+    // one shortlist instead of spawning two.
     const shortlistId = await upsertShortlist({
-      chatId,
+      chatId: SAVE_CHAT_SCOPE,
       userId: DEMO_USER_ID,
       city: c.city,
       businessType: category,
@@ -531,13 +544,16 @@ const compareSavedSites = tool({
       residents: number | null;
       rivals: number | null;
       status: string;
-    }>(savedSitesRowsSql(c.city, cats, DEMO_USER_ID));
+      // `category` is the trade word the user asked about and the one the shortlist was saved
+      // under; passed as business_type so this only ever returns saved sites of the REQUESTED
+      // trade, never every saved trade in the city re-scored on this trade's surface.
+    }>(savedSitesRowsSql(c.city, cats, DEMO_USER_ID, category));
 
     if (rows.length === 0) {
       return { savedSites: 0 };
     }
 
-    const geojsonText = await queryText(savedSitesGeoJsonSql(c.city, cats, DEMO_USER_ID));
+    const geojsonText = await queryText(savedSitesGeoJsonSql(c.city, cats, DEMO_USER_ID, category));
     await emitLayer(clickhouse, {
       layer: "saved",
       label: `${rows.length} saved ${category} ${rows.length === 1 ? "site" : "sites"} in ${c.city}`,
@@ -549,10 +565,14 @@ const compareSavedSites = tool({
     return {
       sites: rows.map((r) => ({
         label: r.label,
-        // Omitted when unscored — absent != 0. Present only when today's surface scored the cell.
+        // absent != 0, applied to ALL three market numbers together — they come back null as a set
+        // for a saved site outside today's scored set (one LEFT JOIN miss). Omitting only marketGap
+        // while passing residents/rivals as literal null let the model narrate "0 residents, 0
+        // rivals" for an unscored site — the exact absent-as-zero misstatement the omission exists
+        // to prevent. They are present only when today's surface actually scored the cell.
         ...(r.market_gap != null ? { marketGap: r.market_gap } : {}),
-        residents: r.residents,
-        rivals: r.rivals,
+        ...(r.residents != null ? { residents: r.residents } : {}),
+        ...(r.rivals != null ? { rivals: r.rivals } : {}),
         status: r.status,
       })),
     };

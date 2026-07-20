@@ -32,9 +32,24 @@ async function client(env: Env): Promise<Client> {
   return c;
 }
 
+/**
+ * The shortlist key's chat scope — MUST match `SAVE_CHAT_SCOPE` in web/src/trigger/chat.ts.
+ *
+ * Both save paths key a shortlist on (chat_id, user_id, city, business_type). This Worker path (the
+ * map-click save) and the agent's `saveSite` tool have to use the SAME chat_id, or one (user, city,
+ * trade) splits across two shortlist rows — there is no unique constraint to catch it. The Worker
+ * used to key on the browser session's `chatId`, which the agent tool can never see, so a click
+ * save and an agent save for the same trade landed under different shortlists. A fixed constant on
+ * both sides collapses them to one. The `chatId` in the request body is now ignored for the key.
+ */
+const SAVE_CHAT_SCOPE = "wherehouse-demo";
+
 export async function handleSaveSite(request: Request, env: Env): Promise<Response> {
   const input = (await request.json()) as {
-    chatId: string;
+    // Still accepted from the browser, but NO LONGER used as the shortlist key — see
+    // SAVE_CHAT_SCOPE. Keying on the session chatId here split saves from the agent's saveSite
+    // (which cannot see it) into a separate shortlist for the same (user, city, trade).
+    chatId?: string;
     city: string;
     category: string;
     label: string;
@@ -50,7 +65,7 @@ export async function handleSaveSite(request: Request, env: Env): Promise<Respon
       `SELECT id FROM shortlists
        WHERE chat_id = $1 AND user_id = $2 AND city = $3 AND business_type = $4
        LIMIT 1`,
-      [input.chatId, "u1", input.city, input.category],
+      [SAVE_CHAT_SCOPE, "u1", input.city, input.category],
     );
     let shortlistId: number;
     if (existing.rows.length > 0) {
@@ -59,7 +74,7 @@ export async function handleSaveSite(request: Request, env: Env): Promise<Respon
       const inserted = await c.query<{ id: string }>(
         `INSERT INTO shortlists (chat_id, user_id, title, city, business_type)
          VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [input.chatId, "u1", input.label, input.city, input.category],
+        [SAVE_CHAT_SCOPE, "u1", input.label, input.city, input.category],
       );
       shortlistId = Number(inserted.rows[0].id);
     }

@@ -158,56 +158,9 @@ export async function insertSavedSite(input: {
 
 // `SavedSiteRow` (one saved site as the panel reads it) now lives in `./types` — imported
 // and re-exported above.
-
-/**
- * The panel's initial render. Postgres is authoritative here — the newest save is visible with
- * no CDC wait. Joins shortlists for the `city` filter (and to carry city/business_type out).
- * `created_at DESC` = newest first. There are no tombstones on the write side; the CDC target's
- * `_peerdb_is_deleted` filter is a read-side (ClickHouse) concern, not this one.
- */
-export async function listSavedSites(
-  userId: string,
-  city?: string,
-): Promise<SavedSiteRow[]> {
-  const params: (string | number)[] = [userId];
-  let cityFilter = "";
-  if (city) {
-    params.push(city);
-    cityFilter = ` AND sl.city = $2`;
-  }
-  const result = await pool.query<{
-    id: string;
-    shortlist_id: string;
-    label: string;
-    lon: number;
-    lat: number;
-    h3_8: string;
-    score: number | null;
-    status: string;
-    city: string;
-    business_type: string;
-    created_at: Date;
-  }>(
-    `SELECT ss.id, ss.shortlist_id, ss.label, ss.lon, ss.lat, ss.h3_8,
-            ss.score, ss.status, sl.city, sl.business_type, ss.created_at
-     FROM saved_sites ss
-     JOIN shortlists sl ON sl.id = ss.shortlist_id
-     WHERE ss.user_id = $1${cityFilter}
-     ORDER BY ss.created_at DESC`,
-    params,
-  );
-  return result.rows.map((r) => ({
-    id: Number(r.id),
-    shortlist_id: Number(r.shortlist_id),
-    label: r.label,
-    lon: r.lon,
-    lat: r.lat,
-    h3_8: r.h3_8,
-    score: r.score,
-    status: r.status,
-    city: r.city,
-    business_type: r.business_type,
-    created_at:
-      r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
-  }));
-}
+//
+// The saved-sites LIST read lives in exactly two places, one per store the two runtimes can reach:
+// the Worker's `handleListSaved` (Postgres via Hyperdrive, infra/app-worker/src/postgres.ts) and
+// the browser's `fetchSavedSitesFromClickHouse` (ClickHouse direct). A third, Postgres-via-`pg`
+// copy used to live here for a Next server action; the static export (`output: "export"`) has no
+// server runtime to run it, so it had no caller and was removed rather than left to drift.

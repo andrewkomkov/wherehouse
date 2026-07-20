@@ -648,15 +648,27 @@ export function Chat() {
 
   // Latest write wins per layer id — ADR-001 merges parts on type+id, so a layer that is
   // rewritten as it fills arrives here as one part with new content.
+  //
+  // Scoped to the CURRENT answer, not every message ever sent. A rebuild (new city/trade) always
+  // begins with findCompetitors, so the last message carrying a `competitors` data-map part anchors
+  // the current answer; parts from BEFORE it are stale — a previous trade's catchment that a "not
+  // measured" rebuild never re-emits, or a `saved` overlay from an earlier compare turn — and
+  // merging them in repaints them onto the new answer (the same bug class the `trend` scope below
+  // fixes). Parts AT OR AFTER the anchor still belong to the current answer: a later compare turn's
+  // `saved` overlay, or a UI-only turn that emits no map part at all (so the whole answer persists).
   const latest = useMemo(() => {
+    let anchor = 0;
+    for (let i = 0; i < messages.length; i++)
+      if (messages[i].parts.some((p) => p.type === "data-map" && p.data.layer === "competitors"))
+        anchor = i;
     const out = new Map<LayerId, LayerData>();
-    for (const m of messages)
-      for (const p of m.parts) if (p.type === "data-map") out.set(p.data.layer, p.data);
+    for (let i = anchor; i < messages.length; i++)
+      for (const p of messages[i].parts) if (p.type === "data-map") out.set(p.data.layer, p.data);
     return out;
   }, [messages]);
 
   const signature = [...latest.values()]
-    .map((d) => `${d.layer}:${d.kind === "handle" ? d.handle : d.rowCount}`)
+    .map((d) => `${d.layer}:${d.rev}`)
     .join("|");
 
   // The latest momentum series (feature 004). Same last-write-wins as the map parts — the tool
@@ -1013,8 +1025,21 @@ export function Chat() {
     const m = map.current;
 
     (async () => {
+      // Clear any layer still on the map that this answer does not include — the live counterpart of
+      // replayFrom's snapshot clearing. `latest` is scoped to the current answer, so a source whose
+      // layer is absent from it is stale (a prior trade's catchment, or a saved overlay a rebuild
+      // dropped) and must be wiped, not left painted under the new answer.
+      for (const id of LAYER_IDS) {
+        if (!latest.has(id)) {
+          (m.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(EMPTY);
+          painted.current.delete(id);
+          delete store.current[id];
+        }
+      }
       for (const data of latest.values()) {
-        const sig = `${data.kind === "handle" ? data.handle : data.rowCount}`;
+        // Content-addressed at the emission level (MapData.rev), so a re-emitted layer with an
+        // identical row count still repaints — the old rowCount-based signature skipped it.
+        const sig = data.rev;
         if (painted.current.get(data.layer) === sig) continue;
         try {
           const raw =
@@ -1701,10 +1726,16 @@ export function Chat() {
   useEffect(() => {
     for (const cmd of uiCommands) {
       if (appliedUi.current.has(cmd.id)) continue;
+      // highlightExtreme reads the opportunity surface from the store. That surface arrives via an
+      // async handle fetch (~550ms) that can lag a command emitted in the same run — right after
+      // scoreArea. Defer WITHOUT marking it applied so it retries once the surface lands (the effect
+      // re-runs on storeVersion, bumped when a layer is painted). Marking it applied against an empty
+      // store made "show me the worst place" a permanent silent no-op.
+      if (cmd.data.action === "highlightExtreme" && !store.current.opportunity) continue;
       appliedUi.current.add(cmd.id);
       applyUiCommand(cmd.data);
     }
-  }, [uiCommands, applyUiCommand]);
+  }, [uiCommands, applyUiCommand, storeVersion]);
 
   const liveText = busy ? "assembling" : "ready";
   const lastRun = runs.length ? runs[runs.length - 1] : null;

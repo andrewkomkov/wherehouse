@@ -43,12 +43,11 @@
  */
 
 import type { ExpressionSpecification } from "maplibre-gl";
-
-/**
- * The p95 scalars ClickHouse used for THIS query's `gap`. Not re-derivable in the browser —
- * see the header. Sent on the `opportunity` part.
- */
-export type Scale = { popP95: number; supP95: number; accP95: number };
+// The p95 scalars ClickHouse scored THIS query with (not re-derivable in the browser — see the
+// header). Defined once in the dependency-free lib/types.ts and re-exported here so this module's
+// importers are unchanged; it used to be duplicated verbatim between here and trigger/layers.ts.
+import type { Scale } from "../lib/types";
+export type { Scale };
 
 /** The per-cell properties the choropleth GeoJSON carries (scoring.ts → choroplethSql). */
 export type CellProps = {
