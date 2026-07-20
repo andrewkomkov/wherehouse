@@ -16,7 +16,7 @@ import {
   choroplethSql,
   choroplethStatsSql,
   rankSql,
-  catchmentSql,
+  catchmentEdgesSql,
   catchmentStatsSql,
   savedSitesRowsSql,
   savedSitesGeoJsonSql,
@@ -516,10 +516,15 @@ const showCatchment = tool({
       };
     }
 
-    const geojsonText = await queryText(catchmentSql(c.city, pick.h3));
+    // The spider web: the reachable STREET NETWORK, not the filled blob (same origin, same 10 min
+    // — docs/architecture/spider-web-catchment.md). emitLayer routes the dense central webs to the
+    // handle path on measured bytes, so a >1 MiB FeatureCollection rides the same rails as the
+    // choropleth. `lobes` from the polygon still gates not-measured above; here it is just the
+    // layer's row hint (the client dedups on `rev`, not this count — see layers.ts::MapData).
+    const geojsonText = await queryText(catchmentEdgesSql(c.city, pick.h3));
     await emitLayer(clickhouse, {
       layer: "catchment",
-      label: "10-minute walk from the top pick",
+      label: "streets you can walk in 10 minutes from the top pick",
       geojsonText,
       rowCount: stats.lobes,
     });

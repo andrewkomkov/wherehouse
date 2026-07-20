@@ -295,10 +295,12 @@ const CAPACITY_RAMP: { at: number; color: string }[] = [
   { at: 1, color: "rgba(255,196,120,0.9)" },
 ];
 
-// The teal band for the walk catchment. Kept clear of the competitor warm and the pick yellow so
-// the shape reads as "the walk", not a data value: a low-alpha fill under a crisp accent outline.
-const CATCHMENT_FILL_OPACITY = 0.14;
-const CATCHMENT_LINE_WIDTH = 2;
+// The walk catchment is now the spider web — the reachable STREET NETWORK (LineStrings), not a
+// filled blob. A `fill` layer draws nothing over LineStrings, so the fill is pinned invisible
+// (0) and only the line carries the layer; the line is thin because it is a street, not a
+// corridor, and it is coloured by walk-time (see the `catchment-line` layer def).
+const CATCHMENT_FILL_OPACITY = 0;
+const CATCHMENT_LINE_WIDTH = 1.1;
 
 // The user's saved sites (feature 003, compareSavedSites). Drawn as a HOLLOW ring on purpose:
 // competitor dots are filled warm, the pick pins are solid yellow — both are things the app is
@@ -516,11 +518,30 @@ function useMapInstance(container: React.RefObject<HTMLDivElement | null>) {
         source: "catchment",
         paint: { "fill-color": C.accent, "fill-opacity": 0 },
       });
+      // The spider web's streets, coloured by walk-time: bright on your doorstep, fading toward
+      // the 10-min fringe, so the eye reads the fast core first. `t` is accumulated seconds (set by
+      // catchmentEdgesSql). Colour is a data expression set ONCE here; the reveal only tweens
+      // line-width/opacity (below), never line-color — so the ramp is derived, not re-animated.
+      // Kept inside the teal family so it still reads as "the catchment".
       m.addLayer({
         id: "catchment-line",
         type: "line",
         source: "catchment",
-        paint: { "line-color": C.accent, "line-width": 0, "line-opacity": 0 },
+        paint: {
+          "line-color": [
+            "interpolate",
+            ["linear"],
+            ["get", "t"],
+            0,
+            "#d6fbff", // on the doorstep — brightest
+            300,
+            C.accent, // ~5 min
+            600,
+            "rgba(140,220,225,0.35)", // ~10-min fringe — dim
+          ],
+          "line-width": 0,
+          "line-opacity": 0,
+        },
       });
       m.addLayer({
         id: "competitors",

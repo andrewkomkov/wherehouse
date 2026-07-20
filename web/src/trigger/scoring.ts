@@ -589,6 +589,40 @@ export function catchmentSql(city: CityName, pickH3: string): string {
 }
 
 /**
+ * The SAME walk catchment as `catchmentSql`, drawn as the reachable STREET NETWORK instead of the
+ * filled blob — one LineString Feature per edge Valhalla explored, each tagged `t` = accumulated
+ * seconds on foot to reach it (the within-web fast-core → 10-min-fringe gradient the renderer
+ * colours by). This is the spider web (docs/architecture/spider-web-catchment.md): same origin
+ * rule, same 10 minutes, opposite emphasis — the blob shows the *area*, the web shows the
+ * *network* that produces it, so a river with one bridge or a superblock with no through-path
+ * reads instead of being smoothed over.
+ *
+ * Reads `geo.isochrone_edges` (render-only sibling of `geo.isochrones`, NOT `isochrone_cells`) —
+ * one 10-min expansion per origin, no `minutes` column: the whole tree is stored and the renderer
+ * thresholds by `t`. Origin is the pick's res-9 centre child, IDENTICAL to `catchmentSql`, so the
+ * web and the blob are one measurement drawn two ways.
+ *
+ * ⚠️ `geom` is emitted **verbatim** — Valhalla emits `[lon, lat]`, GeoJSON wants `[lon, lat]`, so
+ * there is NO coordinate swap on this path (same as `catchmentSql`; see the trap block in 012).
+ *
+ * Zero rows ⇒ empty features array ⇒ the pick has no web — the same no-footpath-within-150 m miss
+ * the polygon has, and `catchmentStatsSql`'s `lobes = 0` gate already catches it before this runs.
+ *
+ * A dense central origin exceeds the 1 MiB stream cap (measured 1.06 MiB), so `emitLayer` routes
+ * it to the handle path on measured bytes — no special handling here.
+ */
+export function catchmentEdgesSql(city: CityName, pickH3: string): string {
+  const h3 = pickH3.replace(/'/g, "''");
+  return `WITH h3ToCenterChild(stringToH3('${h3}'), 9) AS oc
+  SELECT concat('{"type":"FeatureCollection","features":[',
+    arrayStringConcat(groupArray(concat(
+      '{"type":"Feature","geometry":{"type":"LineString","coordinates":', geom,
+      '},"properties":{"t":', toString(duration_s), '}}')), ','),
+    ']}')
+  FROM geo.isochrone_edges WHERE origin_h3_9 = oc AND city = '${city}'`;
+}
+
+/**
  * Cheap stats for the catchment layer — never geometry (ADR-001).
  *
  * `lobes` counts the contour rows (a multi-lobed catchment is several); `reachablePeople` is the
