@@ -53,6 +53,14 @@ export type { Scale };
 export type CellProps = {
   /** The score ClickHouse computed, at neutral weights. Kept for the neutral fast path. */
   gap: number;
+  /**
+   * Composite demand, 0..100, precomputed server-side: the equal-weight mean of whichever demand
+   * axes the cell has — residents, built floor-area, address density — each clamped at its own p95
+   * (scoring.ts `dem`). Already normalised, so the demand factor reads it directly; there is no
+   * client-side p95 for demand, which is why SQL, JS and the MapLibre expression cannot disagree on
+   * it (they all read the same number).
+   */
+  dem: number;
   /** Kontur residents. Integral in all three countries — verified, so `round()` in SQL is lossless. */
   pop: number;
   /** Competitors in the k=1 ring (~1 km across). */
@@ -101,12 +109,16 @@ type Factor = {
  */
 export const FACTORS: readonly Factor[] = [
   {
+    // The id stays `residents` (the slider/Weights key the whole app is wired on), but the factor
+    // is now the COMPOSITE demand: residents + built floor-area + address density, blended and
+    // normalised server-side into `dem` (scoring.ts). The label says so.
     id: "residents",
-    label: "Residents",
-    note: "Kontur · people who live here",
-    // demand_n = least(100, 100 * pop / pop_p95)
-    term: (p, s) => Math.min(100, (100 * p.pop) / s.popP95),
-    expr: (s) => ["min", 100, ["/", ["*", 100, ["get", "pop"]], s.popP95]],
+    label: "Demand",
+    note: "residents + built capacity + addresses",
+    // demand_n IS the precomputed `dem` (0..100). No client p95 to recompute — the reason SQL, JS
+    // and the expression stay bit-identical is that all three read this same server-computed value.
+    term: (p) => p.dem,
+    expr: () => ["get", "dem"],
   },
   {
     id: "lowCompetition",

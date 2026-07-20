@@ -259,8 +259,19 @@ const scoreArea = tool({
 type Pick = {
   h3: string;
   gap: number;
+  /** Composite demand (0..100) for this cell — the pick card re-scores on it under the sliders. */
+  dem: number;
+  /** Reachable residents (rounded). Always present — rankSql only returns measured (has_acc=1) cells. */
+  acc: number;
   pop: number;
   sup: number;
+  /**
+   * Demand context for the pick card (feature: built-environment demand). Built floor-area (m2) and
+   * Overture address count for the pick's own cell. NULL when the cell has no building/address data
+   * — absent, never a measured 0 (the card then shows nothing for that line).
+   */
+  cap_m2: number | null;
+  addr: number | null;
   lon: number;
   lat: number;
   /**
@@ -355,8 +366,15 @@ const rankSites = tool({
           properties: {
             rank: i + 1,
             gap: p.gap,
+            // `dem` lets the pick card re-score under the sliders with the same composite demand
+            // the choropleth uses. capM2/addr are the demand context shown on the card — omitted
+            // when the cell has no building/address data (absent != 0).
+            dem: p.dem,
+            acc: p.acc,
             pop: p.pop,
             sup: p.sup,
+            ...(p.cap_m2 != null ? { capM2: p.cap_m2 } : {}),
+            ...(p.addr != null ? { addr: p.addr } : {}),
             h3: p.h3,
             place: placeName(p),
             ...(hasFit ? { fit: a.fit, topNeighbours: a.neighbours } : {}),
@@ -388,6 +406,13 @@ const rankSites = tool({
           gap: p.gap,
           population: p.pop,
           competitorsNearby: p.sup,
+          // Built-environment demand context beyond the resident headcount (feature: composite
+          // demand). builtFloorAreaM2 is an ESTIMATE (floor-area = footprint x storeys, and storeys
+          // are only ~24% surveyed, so it is for relative sense, not a survey); addressCount is the
+          // Overture address (premises) count in the cell. Both omitted when the cell has no such
+          // data (absent != 0). The prompt binds how the model may state them.
+          ...(p.cap_m2 != null ? { builtFloorAreaM2: p.cap_m2 } : {}),
+          ...(p.addr != null ? { addressCount: p.addr } : {}),
           // EDITORIAL, not measured, and NOT part of the score — the model MAY relay these as a
           // complementary aside (see SYSTEM_PROMPT). Omitted when no complementary trade is
           // nearby, so the model has nothing to relay and cannot narrate an absence as "fit 0".
@@ -653,9 +678,9 @@ const setLayer = tool({
 
 const reweight = tool({
   description:
-    "Move the re-weight sliders that recolour the opportunity surface. There are ONLY three factors and each is 0–100: residents (Kontur population), competition (headroom vs rivals), accessibility (residents within a 10-min walk — 'walkability'). There is NO rent factor; never accept or invent one. Pass only the sliders the user asked to change. Use for 'weight walkability to the max', 'care more about residents', etc.",
+    "Move the re-weight sliders that recolour the opportunity surface. There are ONLY three factors and each is 0–100: demand (a blend of residents, built floor-area capacity and address density — passed as the 'residents' slider), competition (headroom vs rivals), accessibility (residents within a 10-min walk — 'walkability'). There is NO rent factor; never accept or invent one. Pass only the sliders the user asked to change. Use for 'weight walkability to the max', 'care more about demand', 'care more about residents', etc.",
   inputSchema: z.object({
-    residents: z.number().optional().describe("0–100, Kontur resident demand"),
+    residents: z.number().optional().describe("0–100, the demand factor: residents + built capacity + address density"),
     competition: z.number().optional().describe("0–100, low-competition headroom"),
     accessibility: z.number().optional().describe("0–100, 10-min-walk accessibility"),
   }),
@@ -729,7 +754,7 @@ export const SYSTEM_PROMPT = [
   // request has a tool, and a UI or rebuild request must NEVER resolve as a pure-text turn.
   "When the user asks to change what is on screen, DO IT with a tool — never answer such a request with prose alone. A request to change the view or the answer must never be a text-only reply.",
   "A new trade or a new city is a full REBUILD: call findCompetitors, then scoreArea, then rankSites, then showCatchment for the new (city, trade). 'what about gyms?', 'show me pharmacies instead', 'and in Amsterdam?' are rebuilds, not remarks.",
-  "For a request about the CURRENT view, call the matching UI tool: 'hide/show the competitors (or any layer)' -> setLayer; 'weight walkability/residents/competition higher or to the max' -> reweight (only those three factors — there is NO rent); 'show me the worst/best place' -> highlightExtreme; 'open pick 2' or 'show the #1 pick' -> focusPick; 'go back to the bakery answer' or an earlier run -> reviewRun; 'export/download/share a report or PDF' -> exportReport.",
+  "For a request about the CURRENT view, call the matching UI tool: 'hide/show the competitors (or any layer)' -> setLayer; 'weight walkability/demand/residents/competition higher or to the max' -> reweight (only those three factors — demand, competition, accessibility; the demand slider blends residents + built capacity + address density; there is NO rent); 'show me the worst/best place' -> highlightExtreme; 'open pick 2' or 'show the #1 pick' -> focusPick; 'go back to the bakery answer' or an earlier run -> reviewRun; 'export/download/share a report or PDF' -> exportReport.",
   "After acting you MAY add at most ONE short caption sentence — never instead of acting, only after. If a request would change the screen and you only wrote text, you failed it.",
   "Then stop and write AT MOST TWO SHORT SENTENCES. No preamble: never say what you are about to do, just do it.",
   // ⚠️ THE CAPTION'S JOB, AND WHY THIS IS SO INSISTENT.
@@ -828,6 +853,10 @@ export const SYSTEM_PROMPT = [
   "After the map tools, for a 'where should I open X' question you MAY call categoryTrend once to add the market's direction over recent years.",
   "State categoryTrend ONLY as RELATIVE momentum measured from OSM edit history — e.g. 'cafes in Berlin are up about 11% since 2022' or 'bakeries look saturated' — using its `direction`, `pctChange` and `sinceYear`. Say the window truthfully as 'since <sinceYear>' (the series runs from ~2022, MORE than three years); NEVER say a fixed 'three years'. NEVER present it as an exhaustive or absolute count of the businesses in the city, and never claim the numbers are live or always current.",
   "If categoryTrend returns 'not enough history', say the trend is unknown for that trade and move on. NEVER invent a direction, a percentage or a flat-at-zero trend for a trade it could not measure.",
+  // Composite demand (feature: built-environment demand). The opportunity score's demand term now
+  // blends residents with built floor-area (Overture buildings) and address density (Overture
+  // addresses), not residents alone. A pick MAY carry `builtFloorAreaM2` and/or `addressCount`.
+  "The opportunity score's demand side now blends resident population with built floor-area and address (premises) density, so a dense mixed-use block scores as demand a residents-only count would miss. You MAY mention a pick's `builtFloorAreaM2` or `addressCount` as demand context, but state built floor-area as an ESTIMATE (from building footprints and partial storey data), never a survey, and address count as the number of Overture addresses in the cell. Only ever use the numbers a tool returned for that pick; never invent or compare them across cities.",
   "The score is a ranking heuristic over real data, not a measurement. Do not overstate it.",
   "If a tool returns an error, say plainly what is unavailable. Never pretend a map was drawn.",
 ].join(" ");

@@ -87,6 +87,21 @@ function candidateCells(city: CityName, categories: string[]): string {
     WHERE city = '${city}' AND category IN (${catList})
     GROUP BY cell
   ),
+  -- Built floor-area per cell, read from the incremental capacity MV (geo.cell_capacity_mv over
+  -- ~1.57M Overture footprints, db/clickhouse/011_overture_demand.sql). sumMerge collapses the
+  -- AggregateFunction states to a plain m2 total. Second demand axis — potential occupancy that a
+  -- residents count misses (offices, dense commercial). has_cap flags a real match: a LEFT-JOIN
+  -- miss below must drop out of the demand blend, never count as a measured 0 (absent != 0).
+  cap AS (
+    SELECT h3_8, sumMerge(floor_area_m2) AS floor_area, toUInt8(1) AS has_cap
+    FROM geo.cell_capacity WHERE city = '${city}' GROUP BY h3_8
+  ),
+  -- Overture address (door) count per cell — third demand axis, premises density. Same absent
+  -- discipline as capacity.
+  addr AS (
+    SELECT h3_8, addr_count, toUInt8(1) AS has_addr
+    FROM geo.addr_density WHERE city = '${city}'
+  ),
   acc AS (
     -- Residents reachable on foot in 10 min from the cell's res-9 centre child (D2), against
     -- the real street network. population/7 spreads a res-8 parent evenly over its seven res-9
@@ -102,31 +117,47 @@ function candidateCells(city: CityName, categories: string[]): string {
   ),
   joined AS (
     SELECT c.h3_8 AS cell, c.population AS pop, coalesce(s.n, 0) AS sup,
+      cp.floor_area AS cap_area, coalesce(cp.has_cap, 0) AS has_cap,
+      ad.addr_count AS addr_cnt, coalesce(ad.has_addr, 0) AS has_addr,
       a.acc_pop AS acc_pop, coalesce(a.has_acc, 0) AS has_acc
     FROM cells c
     LEFT JOIN supply s ON c.h3_8 = s.cell
+    LEFT JOIN cap cp ON c.h3_8 = cp.h3_8
+    LEFT JOIN addr ad ON c.h3_8 = ad.h3_8
     LEFT JOIN acc a ON c.h3_8 = a.cell
   ),
   scale AS (
     -- greatest(..., 1) guards the divide for a category with almost no supply.
+    -- Every p95 is over MEASURED cells only (quantileIf on the has_ flag) — an absent capacity /
+    -- address / catchment must not drag its own scale down. pop is present for every cell.
     SELECT quantile(0.95)(pop) AS pop_p95, greatest(quantile(0.95)(sup), 1) AS sup_p95,
-      -- p95 over MEASURED cells only — the 830 absent Berlin cells must not drag the scale down.
-      greatest(quantileIf(0.95)(acc_pop, has_acc = 1), 1) AS acc_p95
+      greatest(quantileIf(0.95)(acc_pop, has_acc = 1), 1) AS acc_p95,
+      greatest(quantileIf(0.95)(cap_area, has_cap = 1), 1) AS cap_p95,
+      greatest(quantileIf(0.95)(addr_cnt, has_addr = 1), 1) AS addr_p95
     FROM joined
   ),
   scored AS (
-    SELECT cell, pop, sup,
-      least(100, 100 * pop / pop_p95)                                     AS demand_n,
+    SELECT cell, pop, sup, cap_area, addr_cnt, has_cap, has_addr,
+      -- COMPOSITE DEMAND. Population alone answers "who lives here"; it misses commercial/dense
+      -- built stock and premises count. dem is the equal-weight mean of whichever of the three
+      -- normalised demand axes a cell HAS — residents, built floor-area, address density — each
+      -- clamped to 100 at its own p95. Absent axes drop out of the mean (÷ by how many are
+      -- present), never counted as a measured 0 (absent != 0). Already 0..100, so it is the demand
+      -- factor value the browser reads directly — no client-side p95 to recompute for demand.
+      least(100, 100 * pop / pop_p95)                                     AS pop_n,
+      if(has_cap, least(100, 100 * cap_area / cap_p95), 0)                 AS cap_n,
+      if(has_addr, least(100, 100 * addr_cnt / addr_p95), 0)              AS addr_n,
+      (pop_n + cap_n + addr_n) / (1 + has_cap + has_addr)                  AS dem,
       least(100, 100 * sup / sup_p95)                                     AS supply_n,
       least(100, 100 * acc_pop / acc_p95)                                 AS acc_n,
-      -- Three-term product. When accessibility is absent, if(has_acc, ...) yields 1 so the factor
-      -- drops out and the cell scores on the other two exactly as before this feature (D4).
-      demand_n * (100 - supply_n) / 100 * if(has_acc, acc_n / 100, 1)     AS gap,
-      -- Carried through so choroplethStatsSql can hand the three scalars to the browser, which
-      -- re-derives this same score for the re-weight sliders. It must not guess them: a p95
-      -- recomputed client-side is a different p95, and the map would drift off the ranking the
-      -- agent just gave. See the Scale type in layers.ts. has_acc/acc_pop ride along too so the
-      -- stats and choropleth queries can mark absence and print the measured value.
+      -- Three-term product, demand now composite. When accessibility is absent, if(has_acc, ...)
+      -- yields 1 so the factor drops out and the cell scores on the other two exactly as before (D4).
+      dem * (100 - supply_n) / 100 * if(has_acc, acc_n / 100, 1)          AS gap,
+      -- Carried through so choroplethStatsSql can hand the scalars to the browser, which re-derives
+      -- this score for the re-weight sliders. It must not guess them: a p95 recomputed client-side
+      -- is a different p95, and the map would drift off the ranking the agent gave. See the Scale
+      -- type in layers.ts. has_acc/acc_pop ride along too so the stats and choropleth queries can
+      -- mark absence and print the measured value.
       -- (No backticks in here — this string is a JS template literal and one would close it.)
       pop_p95, sup_p95, acc_p95, has_acc, acc_pop
     FROM joined, scale
@@ -164,6 +195,13 @@ export function choroplethSql(city: CityName, categories: string[]): string {
         arrayPushBack(h3ToGeoBoundary(cell), h3ToGeoBoundary(cell)[1])
       ), ','),
       ']]},"properties":{"gap":', toString(round(gap, 1)),
+      -- dem is the composite demand (0..100) the browser's demand slider reads directly; pop
+      -- stays for display (the "~N people" line). Both ride every cell. Emitted at FULL precision
+      -- (not rounded): the browser must re-derive the SAME gap ClickHouse ranked on, and a
+      -- Float64 round-trips exactly through JSON, so client and server read the identical double —
+      -- verify-score.mjs proves 0 mismatches. Rounding it here would shift ~1 display tick on the
+      -- cells whose gap sits on a round(,1) boundary.
+      ',"dem":', toString(dem),
       ',"pop":', toString(round(pop)),
       ',"sup":', toString(sup),
       -- absent != 0: the acc key exists only when the catchment was measured (has_acc=1).
@@ -229,8 +267,19 @@ export function rankSql(city: CityName, categories: string[], limit = 3): string
   return `WITH ${candidateCells(city, categories)}
   SELECT h3ToString(s.cell)          AS h3,
          round(s.gap, 1)             AS gap,
+         -- Composite demand (full precision), so the pick card re-scores under the sliders with the
+         -- exact same demand the choropleth cell of this h3 carries — gapDisplay reads pick.dem.
+         s.dem                       AS dem,
          round(s.pop)                AS pop,
          s.sup                       AS sup,
+         -- Reachable residents (rounded, as the choropleth ships them) so the pick card re-scores
+         -- with the SAME three-term score the ranking used — rankSql only returns has_acc=1 cells,
+         -- so acc is always present here.
+         round(s.acc_pop)            AS acc,
+         -- Demand context for the pick card (absent -> NULL -> omitted downstream, absent != 0):
+         -- built floor-area (m2) and Overture address count for the pick's own cell.
+         round(s.cap_area)           AS cap_m2,
+         s.addr_cnt                  AS addr,
          round(h3ToGeo(s.cell).2, 5) AS lon,
          round(h3ToGeo(s.cell).1, 5) AS lat,
          d.area                      AS area,

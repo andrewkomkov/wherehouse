@@ -111,7 +111,8 @@ async function query(sql) {
 
 const scoreTs = readFileSync(resolve(HERE, "..", "src", "components", "score.ts"), "utf8");
 for (const probe of [
-  "Math.min(100, (100 * p.pop) / s.popP95)", // residents term
+  "term: (p) => p.dem", // demand term reads the precomputed composite `dem` (0..100)
+  'expr: () => ["get", "dem"]', // demand expression — same source, so it cannot drift from SQL
   "100 - Math.min(100, (100 * p.sup) / s.supP95)", // low-competition term
   "Math.min(100, (100 * (p.acc ?? 0)) / s.accP95)", // accessibility term
   "available: (p) => p.acc !== undefined", // the absence test that keeps absent ≠ 0
@@ -130,7 +131,9 @@ for (const probe of [
 }
 
 const FACTORS = [
-  { id: "residents", term: (p, s) => Math.min(100, (100 * p.pop) / s.popP95), expr: (s) => ["min", 100, ["/", ["*", 100, ["get", "pop"]], s.popP95]] },
+  // Demand is now the composite `dem` (residents + built capacity + address density), precomputed
+  // and normalised server-side; the factor reads it directly, which is why it cannot drift from SQL.
+  { id: "residents", term: (p) => p.dem, expr: () => ["get", "dem"] },
   { id: "lowCompetition", term: (p, s) => 100 - Math.min(100, (100 * p.sup) / s.supP95), expr: (s) => ["-", 100, ["min", 100, ["/", ["*", 100, ["get", "sup"]], s.supP95]]] },
   // The one factor a cell may lack. `available`/`guard` drop it out of the product for a cell
   // whose walk was never measured — absent ≠ 0, exactly like `place` in 001.
@@ -221,6 +224,13 @@ const sql = (city, cats) => {
     SELECT arrayJoin(h3kRing(h3_8, 1)) AS cell, count() AS n
     FROM geo.places WHERE city = '${city}' AND category IN (${catList}) GROUP BY cell
   ),
+  cap AS (
+    SELECT h3_8, sumMerge(floor_area_m2) AS floor_area, toUInt8(1) AS has_cap
+    FROM geo.cell_capacity WHERE city = '${city}' GROUP BY h3_8
+  ),
+  addr AS (
+    SELECT h3_8, addr_count, toUInt8(1) AS has_addr FROM geo.addr_density WHERE city = '${city}'
+  ),
   acc AS (
     SELECT o.h3_8 AS cell, sum(p.population / 7) AS acc_pop, toUInt8(1) AS has_acc
     FROM (SELECT h3_8, h3ToCenterChild(h3_8, 9) AS origin FROM cells) o
@@ -230,36 +240,47 @@ const sql = (city, cats) => {
   ),
   joined AS (
     SELECT c.h3_8 AS cell, c.population AS pop, coalesce(s.n, 0) AS sup,
+      cp.floor_area AS cap_area, coalesce(cp.has_cap, 0) AS has_cap,
+      ad.addr_count AS addr_cnt, coalesce(ad.has_addr, 0) AS has_addr,
       a.acc_pop AS acc_pop, coalesce(a.has_acc, 0) AS has_acc
     FROM cells c
     LEFT JOIN supply s ON c.h3_8 = s.cell
+    LEFT JOIN cap cp ON c.h3_8 = cp.h3_8
+    LEFT JOIN addr ad ON c.h3_8 = ad.h3_8
     LEFT JOIN acc a ON c.h3_8 = a.cell
   ),
   scale AS (
     SELECT quantile(0.95)(pop) AS pop_p95, greatest(quantile(0.95)(sup), 1) AS sup_p95,
-      greatest(quantileIf(0.95)(acc_pop, has_acc = 1), 1) AS acc_p95
+      greatest(quantileIf(0.95)(acc_pop, has_acc = 1), 1) AS acc_p95,
+      greatest(quantileIf(0.95)(cap_area, has_cap = 1), 1) AS cap_p95,
+      greatest(quantileIf(0.95)(addr_cnt, has_addr = 1), 1) AS addr_p95
     FROM joined
   ),
   scored AS (
     SELECT cell, pop, sup, has_acc, acc_pop,
-      least(100, 100 * pop / pop_p95) AS demand_n,
+      -- Composite demand, exactly as scoring.ts, but rounded to the value SHIPPED to the browser
+      -- Composite demand at FULL precision, exactly as scoring.ts ships it (toString(dem), no
+      -- round): a Float64 round-trips through JSON, so the browser reads the identical double and
+      -- reproduces this gap bit-for-bit. The absent-axis blend (div by how many of cap/addr are
+      -- present) mirrors scoring.ts. acc below is still computed from round(acc_pop) because acc IS
+      -- shipped rounded (it is fractional and the choropleth writes round(acc_pop)).
+      (least(100, 100 * pop / pop_p95)
+       + if(has_cap, least(100, 100 * cap_area / cap_p95), 0)
+       + if(has_addr, least(100, 100 * addr_cnt / addr_p95), 0))
+      / (1 + has_cap + has_addr)                                            AS dem,
       least(100, 100 * sup / sup_p95) AS supply_n,
       -- acc_n is computed from round(acc_pop), NOT the full-precision acc_pop scoring.ts ranks on.
-      -- The reason is the whole point of this file: the browser is shipped round(acc_pop) (the
-      -- choropleth writes toString(round(acc_pop)), and acc is fractional — sum(pop/7) — unlike
-      -- the integral pop, so the round is lossy), so the gap it can REPRODUCE is the one that
-      -- rounded value implies. scoring.ts's ranking gap uses full acc_pop and differs by one
-      -- display tick (0.1) on ~11 of Berlin's 2,260 cells — cells sitting on a round(,1) boundary.
-      -- Those cells never move in the ranking (the top-3 are all p95-capped at acc_n=100), and at
-      -- neutral the product shows the fast-path shipped gap verbatim, never this recompute. What
+      -- The reason is the whole point of this file: the browser is shipped round(acc_pop) (acc is
+      -- fractional — sum(pop/7) — so the round is lossy), so the gap it can REPRODUCE is the one
+      -- that rounded value implies. Same reasoning now applies to the rounded dem above. What
       -- this file must prove is that the JS and the expression reproduce the score FROM THE SHIPPED
       -- VALUES exactly — so the reference is computed from the shipped values too.
       least(100, 100 * round(acc_pop) / acc_p95) AS acc_n,
-      demand_n * (100 - supply_n) / 100 * if(has_acc, acc_n / 100, 1) AS gap,
+      dem * (100 - supply_n) / 100 * if(has_acc, acc_n / 100, 1) AS gap,
       pop_p95, sup_p95, acc_p95
     FROM joined, scale
   )
-  SELECT round(gap, 1) AS gap, round(pop) AS pop, sup, has_acc, round(acc_pop) AS acc,
+  SELECT round(gap, 1) AS gap, dem, round(pop) AS pop, sup, has_acc, round(acc_pop) AS acc,
          any(pop_p95) OVER () AS popP95, any(sup_p95) OVER () AS supP95,
          any(acc_p95) OVER () AS accP95
   FROM scored FORMAT JSONEachRow`;
@@ -312,7 +333,7 @@ const PROBES = [
 // accessibility factor's `available` test drops it out of the product. JSON.stringify would
 // drop an undefined key for free; here we drop it explicitly since the row already carries it.
 function propsOf(r) {
-  const p = { pop: r.pop, sup: r.sup, gap: r.gap, acc: r.acc };
+  const p = { dem: r.dem, pop: r.pop, sup: r.sup, gap: r.gap, acc: r.acc };
   if (r.has_acc === 0) delete p.acc;
   return p;
 }

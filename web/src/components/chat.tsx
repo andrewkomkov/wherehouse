@@ -2403,6 +2403,22 @@ export function Chat() {
                       <div style={{ fontFamily: MONO, fontSize: 10.5, color: "#8a949d", marginTop: 2 }}>
                         {score} / 100 · ~{Number(p.pop).toLocaleString("en")} people · {p.sup} nearby
                       </div>
+                      {/* Built-environment demand context (feature: composite demand). Built
+                          floor-area is an ESTIMATE (footprint x storeys, storeys ~24% surveyed) —
+                          shown for relative sense, not a survey. Each part absent when the cell has
+                          no such data (absent != 0). Dim, secondary to the residents line above. */}
+                      {(p.capM2 != null || p.addr != null) && (
+                        <div style={{ fontFamily: MONO, fontSize: 9.5, color: "#7c858f", marginTop: 3 }}>
+                          {[
+                            p.capM2 != null
+                              ? `≈${Math.round(p.capM2 / 1000).toLocaleString("en")}k m² built`
+                              : null,
+                            p.addr != null ? `${p.addr.toLocaleString("en")} addresses` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </div>
+                      )}
                       {/* EDITORIAL neighbourhood-fit (feature 005). Present ONLY when the ring holds a
                           complementary trade; absent != 0, never a "0". Chrome-grey tag, never accent. */}
                       {p.topNeighbours && p.topNeighbours.length > 0 && (
@@ -2712,8 +2728,17 @@ export function Chat() {
 type PickProps = {
   rank: number;
   gap: number;
+  /** Composite demand (0..100) + reachable residents — so a pick re-scores as a full 3-factor
+   *  CellProps under the sliders (gapDisplay(p as CellProps)). */
+  dem: number;
+  acc: number;
   pop: number;
   sup: number;
+  /** Built-environment demand context (feature: composite demand): built floor-area (m2, an
+   *  estimate) and Overture address count for the pick's cell. Absent when the cell has no such
+   *  data — the card shows nothing for that line (absent != 0). */
+  capM2?: number;
+  addr?: number;
   h3: string;
   /** Composed by placeName() in trigger/chat.ts. Absent when the cell resolved to no district. */
   place?: string;
