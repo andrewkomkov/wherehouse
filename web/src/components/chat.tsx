@@ -236,6 +236,45 @@ async function fetchLayer(handle: string, signal: AbortSignal): Promise<GeoJSON.
   throw new Error(`layer ${handle} not readable after ${attempts} tries (empty body)`);
 }
 
+// A distinct hue per pick rank, so several webs overlaid at once stay readable when the user clicks
+// pins to COMPARE their reach. Rank 1 keeps the catchment teal; 2/3 are amber/violet, clear of the
+// warm competitor dots and the yellow pin.
+const PICK_WEB_COLORS: Record<number, string> = { 1: C.accent, 2: "#f6b64a", 3: "#b98cff" };
+
+/**
+ * Build the spider-web FeatureCollection SQL for ONE pick, run client-side against ClickHouse. The
+ * origin is the pick's res-9 centre child — the SAME rule scoring.ts::catchmentEdgesSql uses, so a
+ * clicked web and the agent's #1 catchment are one measurement. Inlined (not imported from
+ * scoring.ts, which pulls in @clickhouse/client and must never reach the browser). `geom` is
+ * emitted verbatim ([lon,lat], no swap). city comes from the picks label ("… in Berlin") so it is
+ * lower-cased to match geo.isochrone_edges.city.
+ */
+function pickWebSql(city: string, h3: string): string {
+  const c = city.toLowerCase().replace(/'/g, "''");
+  const k = h3.replace(/'/g, "''");
+  return `WITH h3ToCenterChild(stringToH3('${k}'), 9) AS oc
+  SELECT concat('{"type":"FeatureCollection","features":[',
+    arrayStringConcat(groupArray(concat(
+      '{"type":"Feature","geometry":{"type":"LineString","coordinates":', geom,
+      '},"properties":{"t":', toString(duration_s), '}}')), ','),
+    ']}')
+  FROM geo.isochrone_edges WHERE origin_h3_9 = oc AND city = '${c}'`;
+}
+
+/** Read a pick's spider-web straight out of geo.isochrone_edges as the readonly `site` user
+ *  (013_isochrone_edges_grant.sql) — same browser-direct-to-ClickHouse posture as fetchLayer. */
+async function fetchPickWeb(city: string, h3: string, signal: AbortSignal): Promise<GeoJSON.FeatureCollection> {
+  const params = new URLSearchParams({
+    user: CH_USER,
+    password: CH_PASS,
+    query: `${pickWebSql(city, h3)} FORMAT TabSeparatedRaw`,
+  });
+  const res = await fetch(`${CH_URL}/?${params}`, { signal });
+  if (!res.ok) throw new Error(`pick web fetch failed: ${res.status}`);
+  const text = await res.text();
+  return JSON.parse(text) as GeoJSON.FeatureCollection;
+}
+
 // The user is `u1` everywhere in this demo — no auth yet. Matches DEMO_USER_ID in
 // trigger/chat.ts and "u1" in infra/app-worker/src/postgres.ts (the write side).
 const CH_DEMO_USER_ID = "u1";
@@ -825,6 +864,59 @@ export function Chat() {
     const m = latest.get("picks")?.label.match(/^top \d+ for (.+) in (.+)$/);
     return m ? { category: m[1], city: m[2] } : null;
   }, [latest]);
+
+  // Click a top-pick pin to draw THAT pick's 10-min walk spider-web, in its own colour; click again
+  // to hide it. Several can be on at once so the reach of the picks can be compared side by side.
+  // Imperative (map layers, not React state) with a ref of the ranks currently drawn; ids are
+  // separate from the agent-driven `catchment` layer so the two never collide.
+  const pickWebs = useRef<Set<number>>(new Set());
+  const togglePickWeb = useCallback(
+    async (p: PickProps) => {
+      const m = map.current;
+      if (!m || !answerMeta) return;
+      const src = `pick-web-${p.rank}`;
+      const lyr = `pick-web-line-${p.rank}`;
+      if (pickWebs.current.has(p.rank)) {
+        if (m.getLayer(lyr)) m.removeLayer(lyr);
+        if (m.getSource(src)) m.removeSource(src);
+        pickWebs.current.delete(p.rank);
+        return;
+      }
+      try {
+        const fc = await fetchPickWeb(answerMeta.city, p.h3, new AbortController().signal);
+        if (m.getSource(src)) (m.getSource(src) as maplibregl.GeoJSONSource).setData(fc);
+        else m.addSource(src, { type: "geojson", data: fc });
+        if (!m.getLayer(lyr)) {
+          m.addLayer({
+            id: lyr,
+            type: "line",
+            source: src,
+            paint: {
+              "line-color": PICK_WEB_COLORS[p.rank] ?? C.accent,
+              "line-width": 1.1,
+              "line-opacity": 0.9,
+            },
+          });
+        }
+        pickWebs.current.add(p.rank);
+      } catch {
+        /* a pick with no walkable web (or a transient CH read) simply doesn't draw — no error UI */
+      }
+    },
+    [answerMeta],
+  );
+
+  // A fresh answer's pins replace the previous ones — drop any pick-webs from the old answer so a
+  // stale rank-2 web can't linger under the new picks.
+  useEffect(() => {
+    const m = map.current;
+    if (!m) return;
+    for (const rank of pickWebs.current) {
+      if (m.getLayer(`pick-web-line-${rank}`)) m.removeLayer(`pick-web-line-${rank}`);
+      if (m.getSource(`pick-web-${rank}`)) m.removeSource(`pick-web-${rank}`);
+    }
+    pickWebs.current.clear();
+  }, [answerMeta]);
 
   /**
    * Today's market gap per saved site, keyed by rounded coordinate — the join between the Postgres
@@ -2375,7 +2467,7 @@ export function Chat() {
         <div className="wh-well">
           <div ref={container} style={{ position: "absolute", inset: 0 }} />
 
-          <PickMarkers map={map} ready={ready} picks={displayPicks} visible={visible.picks} onSelect={setSelected} />
+          <PickMarkers map={map} ready={ready} picks={displayPicks} visible={visible.picks} onSelect={setSelected} onToggle={togglePickWeb} />
 
           {/* Feature 006: the worst/best cell the agent marked (highlightExtreme). A REAL scored
               cell from the surface, annotated with its own computed score — never an invented one. */}
@@ -2964,12 +3056,14 @@ function PickMarkers({
   picks,
   visible,
   onSelect,
+  onToggle,
 }: {
   map: React.RefObject<maplibregl.Map | null>;
   ready: boolean;
   picks: GeoJSON.Feature<GeoJSON.Point, PickProps>[];
   visible: boolean;
   onSelect: (rank: number) => void;
+  onToggle: (p: PickProps) => void;
 }) {
   const markers = useRef<maplibregl.Marker[]>([]);
 
@@ -3017,7 +3111,10 @@ function PickMarkers({
           };font-family:${MONO};font-weight:600;font-size:${top ? 15 : 12}px;box-shadow:0 6px 16px -4px rgba(0,0,0,.7)${
             top ? ",0 0 22px -2px rgba(250,255,105,.7)" : ""
           }">${p.rank}${top ? '<span class="wh-ring"></span>' : ""}</div>`;
-          drop.onclick = () => onSelect(p.rank);
+          drop.onclick = () => {
+            onSelect(p.rank);
+            onToggle(p); // draw/hide this pick's own spider-web, to compare reach across picks
+          };
           root.appendChild(drop);
 
           const mk = new maplibregl.Marker({ element: root, anchor: "center" })
@@ -3037,7 +3134,7 @@ function PickMarkers({
       markers.current.forEach((mk) => mk.remove());
       markers.current = [];
     };
-  }, [map, ready, picks, onSelect]);
+  }, [map, ready, picks, onSelect, onToggle]);
 
   useEffect(() => {
     markers.current.forEach((mk) => (mk.getElement().style.display = visible ? "" : "none"));
