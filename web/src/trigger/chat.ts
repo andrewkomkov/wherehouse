@@ -936,6 +936,14 @@ export const whereHouseChat = chat
   .withUIMessage<WhereHouseUIMessage>()
   .agent({
     id: "wherehouse-chat",
+    // Close an idle chat SESSION after 5 min. A chat.agent() session stays alive between turns to
+    // handle follow-ups (the demo really does: rank → reweight → scale → compare in one session),
+    // so it must outlast the gaps between messages — the longest here is ~55 s (ask → reweight).
+    // But the DEFAULT idle window is ~1 h, so every finished session sat "running" for an hour of
+    // wall-clock (compute was only ~47 s, so it was suspended and cost ~nothing — but the dashboard
+    // showed hour-long runs and idle sessions pin a concurrency slot). 300 s covers every in-demo
+    // gap with margin and lets a session settle minutes, not an hour, after the last message.
+    idleTimeoutInSeconds: 300,
     // Tools MUST be declared here, not only passed to streamText — otherwise toModelOutput
     // runs on turn 1 and is silently skipped on every later turn (ADR-001).
     tools,
