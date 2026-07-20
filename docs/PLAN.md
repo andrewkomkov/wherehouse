@@ -599,6 +599,45 @@ three weeks — not four days.
 **This verdict applies to the *runtime* only.** See the revision immediately below: the
 same container, used for the *batch*, is a different question with a different answer.
 
+## Production refresh — the autonomy pipeline (Technical Implementation, 20%)
+
+"Andrew runs a bash script on his laptop monthly" is a bootstrap, not production. The 20%
+criterion asks *"would this work in production?"* — so the loaders get a self-sustaining
+refresh with no human in the loop. Two shapes, and the distinction is the whole point:
+
+**SQL loaders → Trigger.dev `schedules.task`, NO container.** Everything that reads Overture
+or Kontur is `INSERT … SELECT FROM s3()` — ClickHouse Cloud itself reads the parquet, decodes
+the geometry and aggregates. So the refresh is a Trigger.dev scheduled task that only *issues
+SQL*; it runs in the plain managed runtime. Wrapping it in a Cloudflare Container would be a
+container whose only job is to run `curl` — over-engineering. This is also Trigger.dev's second
+meaningful role (the 25% criterion wants depth, not just `chat.agent()`).
+
+- ✅ **`refresh-overture-demand`** (`web/src/trigger/refresh.ts`) — monthly cron, re-reads the
+  latest Overture release into `geo.buildings` / `cell_capacity` / `addr_density` /
+  `road_density`, drops the capacity-MV partition in lockstep (sum/count aren't idempotent),
+  and asserts the MV building count equals the raw table before returning. SQL mirrors
+  `infra/load-overture-demand.sh` (the manual bootstrap); bboxes imported from `scoring.ts`
+  CITIES, not re-declared.
+- ⬜ **extend to the other pure-SQL loaders** — `places` (Overture POI), `population`
+  (Kontur), `districts` (Overture divisions). Same shape, no container. `affinity` is
+  hand-authored editorial data (not a refresh candidate); ohsome `history` is an HTTP walk
+  (heavier, and its cluster was down 20 Jul).
+
+**Valhalla → Cloudflare Container + Trigger.dev cron.** The ONE loader that genuinely needs a
+container: a routing engine plus baked tiles cannot be expressed as SQL. This is exactly the
+"Valhalla-on-CF for the *batch*" call already argued below — every runtime objection (cold
+start, ephemeral disk, mmap latency) is irrelevant to a job that runs 26 minutes once a month.
+
+- ⬜ **`refresh-isochrones`** — monthly Trigger.dev cron → CF Container (Valhalla + amd64 tiles)
+  → `h3PolygonToCells` → `geo.isochrones`. The larger lift (image build, `registry.cloudflare.com`
+  push, `standard-1` instance); pitch it as *architectural autonomy*, never *fresh data* (Berlin's
+  roads move by metres a month — see the decision note below).
+
+**Honest framing throughout (constitution II):** the value is that the pipeline sustains itself,
+never that the data is always fresh. Overture's building stock and road network barely move
+month-to-month. Real freshness lives in POIs, which is why `places` is the loader that most
+earns a frequent schedule.
+
 ## Risk register
 
 | Risk | Severity | Mitigation |
