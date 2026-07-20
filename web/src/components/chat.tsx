@@ -1030,24 +1030,43 @@ export function Chat() {
 
       if (layer === "catchment") {
         src!.setData(fc);
-        const fillOn = visible.catchment ? CATCHMENT_FILL_OPACITY : 0;
         const lineOn = visible.catchment ? 1 : 0;
-        // The contour draws on: the outline strokes in first (width + opacity growing), the fill
-        // washes in a beat behind it. This is the layer arriving from Valhalla, not a decorative
-        // fade — same reveal discipline as the surface, one shape instead of 2,260.
+        // The web BLOOMS outward from the pick. Every edge carries `t` = accumulated seconds on
+        // foot to reach it, so animating a walk-time frontier makes the reachable street network
+        // grow along the streets — near edges light first, the 10-min fringe last — instead of
+        // fading in as one flat shape. The frontier is an opacity expression on `t`: fully lit
+        // behind it, a short fade band at the leading edge, dark ahead. Driven by setPaintProperty
+        // each frame; the scalar line-opacity writes elsewhere (the visibility toggle, the run
+        // reset) cleanly override this expression, so no half-bloomed state can strand edges.
+        let maxT = 0;
+        for (const f of fc.features) {
+          const t = (f.properties as { t?: number } | null)?.t;
+          if (typeof t === "number" && t > maxT) maxT = t;
+        }
+        const ceil = maxT || 600;
+        m.setPaintProperty("catchment-line", "line-width", CATCHMENT_LINE_WIDTH);
+        // A hair of overshoot (1.06) so the very last fringe edges finish lit, not mid-fade.
         await tween(
-          620,
+          900,
           (t) => {
-            m.setPaintProperty("catchment-line", "line-width", CATCHMENT_LINE_WIDTH * Math.min(1, t * 1.4));
-            m.setPaintProperty("catchment-line", "line-opacity", lineOn * Math.min(1, t * 1.6));
-            m.setPaintProperty("catchment", "fill-opacity", fillOn * Math.max(0, (t - 0.25) / 0.75));
+            const frontier = ceil * Math.min(1, t) * 1.06;
+            m.setPaintProperty("catchment-line", "line-opacity", [
+              "interpolate",
+              ["linear"],
+              ["get", "t"],
+              frontier - 90,
+              lineOn,
+              frontier,
+              lineOn * 0.2,
+              frontier + 1,
+              0,
+            ]);
           },
           cancelled,
         );
         if (cancelled()) return;
-        m.setPaintProperty("catchment-line", "line-width", CATCHMENT_LINE_WIDTH);
+        // Settle to a plain scalar so the toggle/reset paths (which write scalars) stay in charge.
         m.setPaintProperty("catchment-line", "line-opacity", lineOn);
-        m.setPaintProperty("catchment", "fill-opacity", fillOn);
         return;
       }
 
