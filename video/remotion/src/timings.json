@@ -1,70 +1,86 @@
 {
   "fps": 60,
-  "totalMs": 119212,
+  "totalMs": 149087,
   "beats": [
     {
       "id": "ask",
       "caption": "Ask in plain words.",
-      "startMs": 2320,
-      "endMs": 10142,
+      "startMs": 800,
+      "endMs": 9817,
       "source": "app",
-      "sourceInMs": 2320
+      "sourceInMs": 2052
     },
     {
       "id": "assemble",
       "caption": "The map is the answer — assembling live from ClickHouse.",
-      "startMs": 10142,
-      "endMs": 29794,
+      "startMs": 9817,
+      "endMs": 26498,
       "source": "app",
-      "sourceInMs": 10142
+      "sourceInMs": 11069
     },
     {
       "id": "pick",
-      "caption": "Lichtenrade — real name, real numbers, nothing invented.",
-      "startMs": 29794,
-      "endMs": 53871,
+      "caption": "Lichtenrade — real name, real numbers, a measured walk.",
+      "startMs": 26498,
+      "endMs": 50087,
       "source": "app",
-      "sourceInMs": 29794
+      "sourceInMs": 27750
     },
     {
-      "id": "reweight",
-      "caption": "Ask it to re-weight — the agent drives the controls itself.",
-      "startMs": 53871,
-      "endMs": 63897,
+      "id": "lens",
+      "caption": "Change the question, not the weights — the biggest markets, even if crowded.",
+      "startMs": 50087,
+      "endMs": 66789,
       "source": "app",
-      "sourceInMs": 53871
+      "sourceInMs": 51339
+    },
+    {
+      "id": "avoid",
+      "caption": "Where NOT to open — the most saturated turf, flagged.",
+      "startMs": 66789,
+      "endMs": 81203,
+      "source": "app",
+      "sourceInMs": 68041
+    },
+    {
+      "id": "district",
+      "caption": "Down to one neighbourhood — six ranked spots inside Neukölln.",
+      "startMs": 81203,
+      "endMs": 95683,
+      "source": "app",
+      "sourceInMs": 82455
     },
     {
       "id": "scale",
-      "caption": "6,700 points — too big for the chat stream, so it isn't in it.",
-      "startMs": 63897,
-      "endMs": 82367,
+      "caption": "Thousands of points — too big for the chat stream, so it isn't in it.",
+      "startMs": 95683,
+      "endMs": 114113,
       "source": "app",
-      "sourceInMs": 63897
+      "sourceInMs": 96935
     },
     {
       "id": "compare",
-      "caption": "A saved site, re-scored against 75M live POIs.",
-      "startMs": 82367,
-      "endMs": 91131,
+      "caption": "A saved site, re-scored against 75M live points.",
+      "startMs": 114113,
+      "endMs": 122080,
       "source": "app",
-      "sourceInMs": 82367
+      "sourceInMs": 115365
     },
     {
       "id": "console",
       "caption": "The whole app is a row in ClickHouse.",
-      "startMs": 91131,
-      "endMs": 101710,
+      "startMs": 122080,
+      "endMs": 132586,
       "source": "console",
-      "sourceInMs": 577
+      "sourceInMs": 594
     },
     {
       "id": "close",
       "caption": "Ask a question. Get a map.",
-      "startMs": 101710,
-      "endMs": 117712,
+      "startMs": 132586,
+      "endMs": 147587,
       "source": "app",
-      "sourceInMs": 91131
+      "sourceInMs": 123332
     }
   ]
 }
