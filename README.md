@@ -135,7 +135,7 @@ into the map dashboard, where the layers draw themselves.
 
 | Layer | Source | Volume |
 |---|---|---|
-| Places, districts | [Overture Maps](https://overturemaps.org) (ODbL) via public S3 | 211,818 POIs · 4,075 district shapes |
+| Places, districts | [Overture Maps](https://overturemaps.org) via public S3 — Places CDLA Permissive 2.0, Divisions ODbL | 211,818 POIs · 4,075 district shapes |
 | Population (demand) | [Kontur](https://data.humdata.org/dataset/kontur-population-dataset) (CC BY 4.0) | 475,535 H3 res-8 cells |
 | Walk catchments | [Valhalla](https://github.com/valhalla/valhalla) on OSM (ODbL), precomputed | 63,479 isochrones · 20,724 origins |
 | Momentum | [ohsome](https://api.ohsome.org)/OSM edit history (ODbL) | monthly series → incremental MV |
