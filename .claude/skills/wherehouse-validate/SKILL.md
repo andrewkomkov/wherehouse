@@ -29,8 +29,10 @@ documented measurements. Source `.env`, then `curl --user "default:$CLICKHOUSE_P
 `candidateCells` CTE (GAP = demand × (100−supply) × accessibility) for a city+category and check:
 - `findCompetitors` → `geo.places` count (Berlin bakery = 1460).
 - `scoreArea` → 2260 cells, notMeasured 830 (berlin/bakery).
-- `rankSites` → top-3 with real district names (Lichtenrade, Biesdorf, Bohnsdorf) via the
-  `geo.districts` LEFT JOIN.
+- `rankSites` → top picks with real district names (Berlin/bakery leads with Lichtenrade, then
+  Biesdorf) via the `geo.districts` LEFT JOIN. Match on *names being real and tool-returned*, not a
+  frozen ordering: ranks 3–4 are within ~1 gap point and reorder as the composite-demand data
+  updates (a second Lichtenrade cell and Bohnsdorf trade places), so do not assert an exact 3rd name.
 - `showCatchment` → lobes=1, reachablePeople≈14,780.
 - `categoryTrend` → the `geo.category_momentum` MV (bakery −5.2, cafe +10.8, since 2022).
 - affinity (`geo.affinity_dict`) → real complementary neighbours per pick.
