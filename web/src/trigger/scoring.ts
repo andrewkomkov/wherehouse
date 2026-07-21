@@ -175,6 +175,56 @@ function candidateCells(city: CityName, categories: string[]): string {
 const DETERMINISTIC_ORDER = "ORDER BY s.gap DESC, s.pop DESC, s.cell ASC";
 
 /**
+ * Feature 007 — consultant lenses. The GAP score (the `gap` column) is defined once and never
+ * changes; a lens only changes the ORDER the same scored cells come back in. Each non-balanced
+ * lens is a STATED weighted-sum preset over the three already-normalized factors — composite
+ * demand `dem`, competition-headroom `100 - supply_n`, accessibility `acc_n` — with the primary
+ * factor at 1.0 and the other two present (0.2–0.3) so the order never collapses to one axis.
+ *
+ * These are viewpoints, not measurements (constitution II): the pin still shows its true balanced
+ * `gap`, and the model may say which lens it used but must never present a lens as *the* answer.
+ *
+ * Weights confirmed live 2026-07-20 (berlin/bakery, composite dem):
+ *   - demand          → Lichtenberg/Charlottenburg cells, dem ~97 with 10–16 rivals — the dense
+ *     mixed-use markets a residents-only view misses, absent from the balanced top.
+ *   - low_competition → agrees with balanced at the very top (0-rival high-demand cells genuinely
+ *     ARE the safest) and reorders below — an honest finding, not a bug.
+ *   - accessible      → likewise coincides with balanced near the top (acc correlates with the
+ *     winners) and reorders the tail.
+ */
+export type RankStrategy = "balanced" | "demand" | "low_competition" | "accessible";
+export type RankOrder = "best" | "worst";
+
+const LENS_SCORE: Record<Exclude<RankStrategy, "balanced">, string> = {
+  demand: "1.0 * s.dem + 0.2 * (100 - s.supply_n) + 0.3 * s.acc_n",
+  low_competition: "0.3 * s.dem + 1.0 * (100 - s.supply_n) + 0.2 * s.acc_n",
+  accessible: "0.3 * s.dem + 0.2 * (100 - s.supply_n) + 1.0 * s.acc_n",
+};
+
+export interface RankOpts {
+  strategy?: RankStrategy;
+  order?: RankOrder;
+  /** A neighbourhood name to rank WITHIN; matches either Overture name tier, case-insensitively. */
+  district?: string;
+  /** For paging ("show me more options"); offset = (page - 1) * count. */
+  offset?: number;
+}
+
+/**
+ * Escape a free string for use inside an `ILIKE '%…%'` pattern. The single-quote escaping is the
+ * load-bearing one — `district` is a free string the model fills, so it is an injection surface;
+ * the `%` `_` `\` escaping is correctness (a name like "50%" or "A_B" must match literally, not as
+ * a wildcard). Backslash first so the escapes we add for the metacharacters are not re-doubled.
+ */
+function escapeIlike(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "''")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+}
+
+/**
  * The opportunity choropleth as one GeoJSON string, assembled in SQL.
  *
  * Built by hand because Cloud is 26.4 and the `GeoJSON` format needs 26.6 (verified absent;
@@ -263,7 +313,49 @@ export function choroplethStatsSql(city: CityName, categories: string[]): string
  * would compare two different scores — a cell could top the list purely by never being measured.
  * The choropleth still shows them (styled as not-measured); only the ranking omits them.
  */
-export function rankSql(city: CityName, categories: string[], limit = 3): string {
+export function rankSql(
+  city: CityName,
+  categories: string[],
+  limit = 3,
+  opts: RankOpts = {},
+): string {
+  const { strategy = "balanced", order = "best", district, offset = 0 } = opts;
+
+  // The order key. Balanced/best is EXACTLY today's DETERMINISTIC_ORDER (FR-002 — the default
+  // answer must not move). 'worst' surfaces the most saturated cells regardless of the strategy
+  // lens: most rivals first, lowest gap to break ties. A strategy lens (best only) reorders by its
+  // stated preset. Every branch ends in the `s.cell` tiebreak, so each (strategy, order, district,
+  // page) is a total order — deterministic paging (FR-009).
+  const orderBy =
+    order === "worst"
+      ? "ORDER BY s.sup DESC, s.gap ASC, s.cell ASC"
+      : strategy === "balanced"
+        ? DETERMINISTIC_ORDER
+        : `ORDER BY ${LENS_SCORE[strategy]} DESC, s.pop DESC, s.cell ASC`;
+
+  // Extra WHERE terms, appended to the mandatory `s.has_acc = 1`.
+  //   worst    — a demand floor so 'worst' means saturated-DESPITE-people, not an empty field.
+  //              pop >= 0.4 * pop_p95 (per-city adaptive; pop_p95 is already carried in `scored`).
+  //              Confirmed live 2026-07-20: berlin/bakery worst = Charlottenburg cells, 59–64
+  //              rivals against 6–8k residents. Re-checked for amsterdam/belgrade before shipping.
+  //   district — rank WITHIN one neighbourhood, matching EITHER Overture name tier (verified:
+  //              'Kreuzberg' exists only as `area`, inside locality 'Friedrichshain-Kreuzberg').
+  //              ILIKE is case-insensitive and umlaut-safe (verified: '%neukölln%' → 69 cells). The
+  //              LEFT JOIN resolves a district for ~98–100% of cells, so this acts as an inner
+  //              filter on match; a name that matches nothing yields zero rows, which the caller
+  //              turns into a 'try one of these' error rather than an empty map (FR-006).
+  const filters: string[] = [];
+  if (order === "worst") filters.push("s.pop >= 0.4 * s.pop_p95");
+  if (district && district.trim() !== "") {
+    const esc = escapeIlike(district.trim());
+    filters.push(`(d.area ILIKE '%${esc}%' OR d.locality ILIKE '%${esc}%')`);
+  }
+  const extraWhere = filters.length ? ` AND ${filters.join(" AND ")}` : "";
+
+  // OFFSET only when paging past the first set — omitted entirely at offset 0 so the default SQL
+  // is byte-for-byte today's (FR-002). Math.trunc guards against a fractional offset.
+  const offsetClause = offset > 0 ? ` OFFSET ${Math.trunc(offset)}` : "";
+
   return `WITH ${candidateCells(city, categories)}
   SELECT h3ToString(s.cell)          AS h3,
          round(s.gap, 1)             AS gap,
@@ -286,9 +378,23 @@ export function rankSql(city: CityName, categories: string[], limit = 3): string
          d.locality                  AS locality
   FROM scored AS s
   LEFT JOIN geo.districts AS d ON s.cell = d.h3_8 AND d.city = '${city}'
-  WHERE s.has_acc = 1
-  ${DETERMINISTIC_ORDER}
-  LIMIT ${limit}`;
+  WHERE s.has_acc = 1${extraWhere}
+  ${orderBy}
+  LIMIT ${limit}${offsetClause}`;
+}
+
+/**
+ * The available neighbourhood names for a city, most-covered first — the honest "try one of these"
+ * list the ranking tool returns when a `district` filter matched nothing (FR-006). Localities are
+ * the broad Overture tier and resolve for ~98–100% of cells in all three cities, so they are the
+ * reliable tier to suggest (the finer `area` tier is patchy, especially in Belgrade). One column,
+ * `locality`.
+ */
+export function availableDistrictsSql(city: CityName): string {
+  const c = city.replace(/'/g, "''");
+  return `SELECT locality FROM geo.districts
+  WHERE city = '${c}' AND locality != ''
+  GROUP BY locality ORDER BY count() DESC LIMIT 12`;
 }
 
 /**

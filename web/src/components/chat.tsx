@@ -10,7 +10,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { layers, namedFlavor } from "@protomaps/basemaps";
 import type { whereHouseChat } from "@/trigger/chat";
-import type { LayerId, Scale } from "@/trigger/layers";
+import type { LayerId, Scale, Lens } from "@/trigger/layers";
 import {
   mintChatAccessToken,
   startChatSession,
@@ -239,7 +239,34 @@ async function fetchLayer(handle: string, signal: AbortSignal): Promise<GeoJSON.
 // A distinct hue per pick rank, so several webs overlaid at once stay readable when the user clicks
 // pins to COMPARE their reach. Rank 1 keeps the catchment teal; 2/3 are amber/violet, clear of the
 // warm competitor dots and the yellow pin.
-const PICK_WEB_COLORS: Record<number, string> = { 1: C.accent, 2: "#f6b64a", 3: "#b98cff" };
+/**
+ * Feature 007 — a short human badge for the consultant lens the picks were produced under, shown
+ * beside "Top picks" so the user can see the pins are a VIEW (biggest markets, avoid, one district,
+ * a later page) and not the definitive top-3. Null for the plain balanced answer (no badge). The
+ * server only sets `lens` for a non-default answer, so a returned lens always has something to say.
+ */
+function lensBadgeLabel(lens: Lens | undefined): string | null {
+  if (!lens) return null;
+  const parts: string[] = [];
+  if (lens.order === "worst") parts.push("avoid · saturated");
+  else if (lens.strategy === "demand") parts.push("biggest markets");
+  else if (lens.strategy === "low_competition") parts.push("least competition");
+  else if (lens.strategy === "accessible") parts.push("most reachable");
+  if (lens.district) parts.push(`in ${lens.district}`);
+  if (lens.page > 1) parts.push(`more · pg ${lens.page}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+// One hue per rank so several overlaid pick webs stay distinguishable. Ranks 4–6 exist because a
+// consultant answer can show up to six pins at once, or page to ranks 4–6 (feature 007).
+const PICK_WEB_COLORS: Record<number, string> = {
+  1: C.accent,
+  2: "#f6b64a",
+  3: "#b98cff",
+  4: "#5fb0ff",
+  5: "#ff8fa3",
+  6: "#7fe0a0",
+};
 
 /**
  * Build the spider-web FeatureCollection SQL for ONE pick, run client-side against ClickHouse. The
@@ -860,10 +887,30 @@ export function Chat() {
    * one place the pair is stated verbatim on the client. `category` may be a group ("food and
    * drink"), which contains no " in " and so survives the greedy split unharmed.
    */
+  // Depend on the picks LABEL STRING, not the `latest` Map. `latest` is a fresh Map on every
+  // streaming chunk (it useMemos on `messages`, which change token by token), so keying answerMeta
+  // on it minted a NEW {category,city} object every chunk. That churned `togglePickWeb` (which
+  // closes over answerMeta), which is a dep of PickMarkers — so the pins were torn down and
+  // re-dropped (with their staggered fade) on EVERY chunk: the "pins flicker while the agent
+  // thinks, then settle when it stops" bug. The label only changes once per answer, so keying on
+  // the string makes answerMeta reference-stable across a stream. (Same reasoning for lensBadge.)
+  const picksLabel = latest.get("picks")?.label ?? "";
   const answerMeta = useMemo(() => {
-    const m = latest.get("picks")?.label.match(/^top \d+ for (.+) in (.+)$/);
+    const m = picksLabel.match(/^top \d+ for (.+) in (.+)$/);
     return m ? { category: m[1], city: m[2] } : null;
-  }, [latest]);
+  }, [picksLabel]);
+
+  // Feature 007 — the consultant lens behind the current pins (map-only field on the picks part),
+  // turned into the "biggest markets / avoid · saturated / in Neukölln / more · pg 2" badge. Null
+  // for the plain balanced answer, so the badge only appears when the pins are a deliberate view.
+  // Keyed on the picks `rev` (changes once per emission) rather than `latest`, so it too is stable
+  // across streaming chunks and never re-triggers a downstream effect mid-stream.
+  const picksRev = latest.get("picks")?.rev ?? "";
+  const lensBadge = useMemo(
+    () => lensBadgeLabel(latest.get("picks")?.lens),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [picksRev],
+  );
 
   // Click a top-pick pin to draw THAT pick's 10-min walk spider-web, in its own colour; click again
   // to hide it. Several can be on at once so the reach of the picks can be compared side by side.
@@ -1454,7 +1501,11 @@ export function Chat() {
   // The #1 pick's score out of 100 — computed under the CURRENT weights exactly as the Top-picks
   // table renders it (gapDisplay), so the two never show different numbers for the same pick when a
   // slider moves.
-  const pick1 = picks.find((f) => f.properties.rank === 1)?.properties;
+  // The best-RANKED pick currently shown — rank 1 on a normal answer, or the lowest rank on a paged
+  // "more options" view (ranks 4–6), so the tile still reads the top of what's on screen (feature 007).
+  const pick1 = picks.length
+    ? [...picks].sort((a, b) => a.properties.rank - b.properties.rank)[0].properties
+    : undefined;
   const topScore = pick1 ? (scale ? gapDisplay(pick1 as CellProps, scale, weights) : pick1.gap) : undefined;
 
   // ---- agent runs (the left-rail centerpiece) -------------------------------------------
@@ -2587,6 +2638,10 @@ export function Chat() {
           <section>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
               <Label inline>Top picks</Label>
+              {/* Feature 007 — the consultant lens badge: says the pins are a deliberate VIEW
+                  (biggest markets / avoid · saturated / in a district / a later page), never the
+                  one definitive top-3. Absent on the plain balanced answer. */}
+              {lensBadge && <Chip>{lensBadge}</Chip>}
               {/* The pins are the agent's ranking, computed at neutral. Dragging a slider recolours
                   the surface but does NOT re-rank; the UI says which it is in two words. */}
               {!neutral && (

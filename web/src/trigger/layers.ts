@@ -40,12 +40,27 @@ export type LayerId = "competitors" | "opportunity" | "picks" | "catchment" | "s
 
 export type BBox = [number, number, number, number];
 
+/**
+ * Feature 007 — the consultant lens the `picks` layer was produced under, carried to the client so
+ * it can badge what the pins currently represent (`by demand`, `avoid — saturated`, `in Neukölln`,
+ * `options 4–6`). Map-only: the model never sees this (ADR-001). Only the `picks` layer sets it;
+ * the default balanced/best/no-district/page-1 is left undefined so a normal answer shows no badge.
+ */
+export type Lens = {
+  strategy: string;
+  order: string;
+  district?: string;
+  page: number;
+};
+
 export type MapData = {
   layer: LayerId;
   label: string;
   rowCount: number;
   bbox?: BBox;
   scale?: Scale;
+  /** Feature 007 — the lens behind a `picks` layer, for the UI badge only. */
+  lens?: Lens;
   /**
    * A fresh token per emission, so the client can tell one write of a layer from the next even when
    * the row count is identical. The client's paint dedup keyed on `rowCount` for inline layers, so
@@ -99,9 +114,10 @@ export async function emitLayer(
     bbox?: BBox;
     scale?: Scale;
     notMeasured?: number;
+    lens?: Lens;
   },
 ): Promise<{ rowCount: number }> {
-  const { layer, label, geojsonText, rowCount, bbox, scale, notMeasured } = opts;
+  const { layer, label, geojsonText, rowCount, bbox, scale, notMeasured, lens } = opts;
   const bytes = Buffer.byteLength(geojsonText, "utf8");
   // One token per emission — the client keys its paint dedup on it (see MapData.rev).
   const rev = crypto.randomUUID();
@@ -121,6 +137,7 @@ export async function emitLayer(
         bbox,
         scale,
         notMeasured,
+        lens,
         kind: "inline",
         geojson: JSON.parse(geojsonText),
       } satisfies MapData,
@@ -135,7 +152,7 @@ export async function emitLayer(
     chat.response.write({
       type: "data-map",
       id: layer,
-      data: { layer, label, rowCount, rev, bbox, scale, notMeasured, kind: "handle", handle } satisfies MapData,
+      data: { layer, label, rowCount, rev, bbox, scale, notMeasured, lens, kind: "handle", handle } satisfies MapData,
     });
   }
 

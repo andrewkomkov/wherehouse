@@ -22,7 +22,10 @@ import {
   savedSitesGeoJsonSql,
   affinityForCellsSql,
   categoryTrendSql,
+  availableDistrictsSql,
   type CityName,
+  type RankStrategy,
+  type RankOrder,
 } from "./scoring";
 
 // DeepSeek speaks the Anthropic wire format, so @ai-sdk/anthropic works unchanged
@@ -141,6 +144,69 @@ const target = z.object({
         `use it when the user asks broadly about eating and drinking rather than one trade.`,
     ),
 });
+
+/**
+ * Feature 007 — the consultant controls, shared by every tool that resolves a pick so a follow-up
+ * ("save #2", "walk the top one", "open pick 3") re-derives from the SAME lensed ranking it is
+ * acting on. All optional with defaults that reproduce today's exact call (balanced / best / no
+ * district / first page), so the mandatory build sequence and every existing caller are unchanged.
+ *
+ * `strategy`/`order`/`district` are the lens; `count`/`page` are how many pins and which page. The
+ * gap on each pin is ALWAYS the balanced score — a lens only changes the ORDER (see scoring.ts).
+ */
+const rankControls = {
+  strategy: z
+    .enum(["balanced", "demand", "low_competition", "accessible"])
+    .default("balanced")
+    .describe(
+      "the ranking lens over the SAME scored cells (the gap shown never changes, only the order): " +
+        "'balanced' (default) = the opportunity score; 'demand' = biggest markets even if competitive; " +
+        "'low_competition' = safest, most room vs rivals; 'accessible' = best 10-min-walk foot traffic.",
+    ),
+  order: z
+    .enum(["best", "worst"])
+    .default("best")
+    .describe(
+      "'best' (default) ranks the top opportunities; 'worst' surfaces the most SATURATED places that " +
+        "still have real demand — where NOT to open. Use 'worst' for 'where should I avoid'.",
+    ),
+  district: z
+    .string()
+    .optional()
+    .describe(
+      "optional neighbourhood name to rank WITHIN, e.g. 'Neukölln', 'Kreuzberg', 'Zemun'. Matches " +
+        "either district tier, case-insensitively.",
+    ),
+  count: z
+    .number()
+    .int()
+    .min(1)
+    .max(6)
+    .default(3)
+    .describe("how many ranked pins to show, 1–6. Default 3. Use up to 6 to compare more options."),
+  page: z
+    .number()
+    .int()
+    .min(1)
+    .default(1)
+    .describe("which page of results, 1-based. Bump to 2+ for 'show me more / other options'."),
+} as const;
+
+/** Pull the shared lens fields out of a validated tool input into scoring.ts's RankOpts + count/page. */
+function rankParams(input: {
+  strategy?: RankStrategy;
+  order?: RankOrder;
+  district?: string;
+  count?: number;
+  page?: number;
+}): { strategy: RankStrategy; order: RankOrder; district?: string; count: number; page: number; offset: number } {
+  const strategy = input.strategy ?? "balanced";
+  const order = input.order ?? "best";
+  const district = input.district?.trim() ? input.district.trim() : undefined;
+  const count = input.count ?? 3;
+  const page = input.page ?? 1;
+  return { strategy, order, district, count, page, offset: (page - 1) * count };
+}
 
 /**
  * Rejects a city we hold no data for.
@@ -375,15 +441,41 @@ export function placeName(p: Pick): string | undefined {
 
 const rankSites = tool({
   description:
-    "Pin the three best places to open. Call this last. The pins carry the population and competitor count behind each score.",
-  inputSchema: target,
-  execute: async ({ city, category }) => {
+    "Pin the best places to open, and vary them like a consultant. Call this last in the build " +
+    "sequence. Beyond the default balanced top 3 it can: rank under a different LENS (strategy: " +
+    "demand/low_competition/accessible), show where NOT to open (order='worst' — the most saturated " +
+    "spots), rank inside one neighbourhood (district), and show more/other options (count up to 6, " +
+    "page 2+). The pins carry the population and competitor count behind each score.",
+  inputSchema: target.extend(rankControls),
+  execute: async ({ city, category, strategy, order, district, count, page }) => {
     const c = checkCity(city);
     if (!c.ok) return c.err;
     const cats = resolveCategories(category);
+    const p = rankParams({ strategy, order, district, count, page });
 
-    const picks = await queryRows<Pick>(rankSql(c.city, cats, 3));
+    const picks = await queryRows<Pick>(
+      rankSql(c.city, cats, p.count, {
+        strategy: p.strategy,
+        order: p.order,
+        district: p.district,
+        offset: p.offset,
+      }),
+    );
     if (picks.length === 0) {
+      // A district that matched nothing must not draw an empty map (it reads as "nowhere is good",
+      // a confident lie — FR-006). Hand the model the real neighbourhood names to offer instead.
+      if (p.district) {
+        const available = await queryRows<{ locality: string }>(availableDistrictsSql(c.city));
+        return {
+          error: "no cells in that district",
+          district: p.district,
+          available: available.map((r) => r.locality),
+        };
+      }
+      // Paging past the last option: say so, don't invent cells (Story 4 AS3).
+      if (p.page > 1) {
+        return { error: "no more options", city: c.city, category, page: p.page };
+      }
       return { error: "no populated cells for that city", city: c.city };
     }
 
@@ -406,6 +498,18 @@ const rankSites = tool({
       }),
     );
 
+    // Rank is the pick's GLOBAL position, so page 2 shows ranks 4,5,6 rather than restarting at 1
+    // (the pins, rail rows, focus targets and spider-web colours all key on this).
+    const startRank = p.offset + 1;
+    // The lens behind these pins, for the client's badge only (map-only, model never sees it). Left
+    // undefined for the plain default (balanced/best/no-district/page-1) so a normal answer shows no
+    // badge and its emission is unchanged.
+    const isDefaultLens =
+      p.strategy === "balanced" && p.order === "best" && !p.district && p.page === 1;
+    const lens = isDefaultLens
+      ? undefined
+      : { strategy: p.strategy, order: p.order, ...(p.district ? { district: p.district } : {}), page: p.page };
+
     const geojson = {
       type: "FeatureCollection",
       features: picks.map((p, i) => {
@@ -419,7 +523,7 @@ const rankSites = tool({
           // heading rather than with an empty one. `fit`/`topNeighbours` are the EDITORIAL signal
           // for the client to render (labelled editorial there); omitted when none nearby.
           properties: {
-            rank: i + 1,
+            rank: startRank + i,
             gap: p.gap,
             // `dem` lets the pick card re-score under the sliders with the same composite demand
             // the choropleth uses. capM2/addr are the demand context shown on the card — omitted
@@ -440,9 +544,12 @@ const rankSites = tool({
 
     await emitLayer(clickhouse, {
       layer: "picks",
+      // Keep the `top N for <cat> in <city>` shape — the client recovers (category, city) from it by
+      // regex. The lens rides its own field, not the label, so that recovery is never disturbed.
       label: `top ${picks.length} for ${category} in ${c.city}`,
       geojsonText: JSON.stringify(geojson),
       rowCount: picks.length,
+      lens,
     });
 
     // The one tool whose result the model may legitimately mention: FR-003 wants the user to
@@ -452,11 +559,15 @@ const rankSites = tool({
     // because a point-in-polygon test put the cell inside that polygon. Where it is absent the
     // key is absent — the model has nothing to relay and the prompt forbids inventing one.
     return {
+      // The active lens, so the caption can state it honestly (FR-010/011): name the lens as a lens,
+      // frame worst as saturated/avoid, say a district answer is scoped. Omitted for the plain
+      // default so a normal answer needs no such caveat.
+      ...(lens ? { lens } : {}),
       picks: picks.map((p, i) => {
         const a = affinityByH3.get(p.h3);
         const hasFit = a != null && a.neighbours.length > 0;
         return {
-          rank: i + 1,
+          rank: startRank + i,
           place: placeName(p),
           gap: p.gap,
           population: p.pop,
@@ -486,17 +597,24 @@ const rankSites = tool({
 
 const showCatchment = tool({
   description:
-    "Show the real measured walk catchment around the best place to open — the area a customer can actually reach on foot in 10 minutes, following streets. Call this after rankSites.",
-  inputSchema: target,
-  execute: async ({ city, category }) => {
+    "Show the real measured walk catchment around the best place to open — the area a customer can actually reach on foot in 10 minutes, following streets. Call this after rankSites. If rankSites used a lens (strategy/order/district), pass the SAME lens so the walk is drawn around that lens's top pick.",
+  inputSchema: target.extend({
+    strategy: rankControls.strategy,
+    order: rankControls.order,
+    district: rankControls.district,
+  }),
+  execute: async ({ city, category, strategy, order, district }) => {
     const c = checkCity(city);
     if (!c.ok) return c.err;
     const cats = resolveCategories(category);
+    const p = rankParams({ strategy, order, district });
 
-    // Re-derive pick #1 from the same total order rankSites ranked on, rather than taking an h3
-    // from the model. rankSql is deterministic (FR-004), so this lands on the identical cell —
-    // and an h3 threaded through the model is a hallucination surface bought for nothing (D5).
-    const picks = await queryRows<Pick>(rankSql(c.city, cats, 1));
+    // Re-derive pick #1 from the same total order rankSites ranked on (same lens/order/district),
+    // rather than taking an h3 from the model. rankSql is deterministic (FR-004), so this lands on
+    // the identical cell — and an h3 threaded through the model is a hallucination surface (D5).
+    const picks = await queryRows<Pick>(
+      rankSql(c.city, cats, 1, { strategy: p.strategy, order: p.order, district: p.district }),
+    );
     if (picks.length === 0) {
       return { error: "no populated cells for that city", city: c.city };
     }
@@ -564,19 +682,26 @@ const saveSite = tool({
     "Save one of the ranked picks to the user's shortlist so they can compare it against the market later. Use when the user asks to save/keep/shortlist a pick.",
   inputSchema: target.extend({
     which: z
-      .enum(["1", "2", "3"])
+      .enum(["1", "2", "3", "4", "5", "6"])
       .default("1")
-      .describe("which ranked pick to save: '1' is the best, then '2', then '3'. Defaults to the best."),
+      .describe("which ranked pick to save by rank: '1' is the best, then '2'…'6'. Defaults to the best."),
+    strategy: rankControls.strategy,
+    order: rankControls.order,
+    district: rankControls.district,
   }),
-  execute: async ({ city, category, which }) => {
+  execute: async ({ city, category, which, strategy, order, district }) => {
     const c = checkCity(city);
     if (!c.ok) return c.err;
     const cats = resolveCategories(category);
+    const p = rankParams({ strategy, order, district });
 
-    // Re-derive the picks from the same deterministic ranking rankSites showed (FR-004), rather
-    // than trusting a model-supplied h3/score — the model never sees the geometry (ADR-001) and a
-    // threaded h3 is a hallucination surface bought for nothing. `which` only chooses among them.
-    const picks = await queryRows<Pick>(rankSql(c.city, cats, 3));
+    // Re-derive the picks from the same deterministic ranking rankSites showed (same lens/order/
+    // district, FR-004), rather than trusting a model-supplied h3/score — the model never sees the
+    // geometry (ADR-001) and a threaded h3 is a hallucination surface. `which` only chooses among
+    // them; up to 6 so it can save any of the on-screen pins.
+    const picks = await queryRows<Pick>(
+      rankSql(c.city, cats, 6, { strategy: p.strategy, order: p.order, district: p.district }),
+    );
     const pick = picks[Number(which) - 1];
     if (!pick) {
       return { error: "no such pick to save", city: c.city, category, which };
@@ -757,8 +882,8 @@ const reweight = tool({
 
 const focusPick = tool({
   description:
-    "Open a ranked pick's provenance panel by rank (1 = best, then 2, then 3). Use when the user asks to open/see/focus a specific pick — e.g. 'open the #2 pick', 'show me the details of the top pick'.",
-  inputSchema: z.object({ rank: z.number().int().min(1).max(3) }),
+    "Open a ranked pick's provenance panel by rank (1 = best, then 2, 3 … up to 6 when that many pins are shown). Use when the user asks to open/see/focus a specific pick — e.g. 'open the #2 pick', 'show me the details of the top pick'.",
+  inputSchema: z.object({ rank: z.number().int().min(1).max(6) }),
   execute: async ({ rank }) => emitUi({ action: "focusPick", rank }),
 });
 
@@ -815,6 +940,18 @@ export const SYSTEM_PROMPT = [
   // request has a tool, and a UI or rebuild request must NEVER resolve as a pure-text turn.
   "When the user asks to change what is on screen, DO IT with a tool — never answer such a request with prose alone. A request to change the view or the answer must never be a text-only reply.",
   "A new trade or a new city is a full REBUILD: call findCompetitors, then scoreArea, then rankSites, then showCatchment for the new (city, trade). 'what about gyms?', 'show me pharmacies instead', 'and in Amsterdam?' are rebuilds, not remarks.",
+  // Feature 007 — rankSites is a CONSULTANT'S RANGE, not a fixed top-3. It takes a strategy lens, a
+  // best/worst order, a district, and a count/page. A user asking for anything beyond the balanced
+  // top three is asking you to VARY the ranking — do it by re-calling rankSites with parameters, not
+  // by claiming those are the only options. (This is the whole point of the feature: the default
+  // ranking genuinely returns the same three cells to every re-weighting, so "there is nothing else"
+  // is only true of the balanced global top — a lens, a district, or a page surfaces real others.)
+  "rankSites can vary its answer. Re-call it with parameters when the user wants more than the balanced top three: 'biggest market / most customers / most demand' -> strategy='demand'; 'least competition / safest / most room' -> strategy='low_competition'; 'best foot traffic / walkability / most reachable' -> strategy='accessible'; 'where should I avoid / worst spots / most saturated' -> order='worst'; 'best <trade> in <neighbourhood>' -> district=<that name>; 'more options / other options / show me more' -> the next page (bump page), or raise count up to 6 to compare more at once.",
+  "'Where should I avoid' / 'the worst places to open' is a fresh rankSites call with order='worst' — it pins the most SATURATED places that still have demand. This is NOT highlightExtreme: highlightExtreme only marks one cell on the surface already on screen; order='worst' is a real ranked answer of where not to open.",
+  // Honesty (constitution II) — a lens is a viewpoint, never the definitive answer.
+  "When you used a non-balanced lens, name WHICH lens in your caption and present it as one view among others, never as the single answer. Frame order='worst' as places already saturated or to avoid — never as 'bad' places. When you ranked inside a district, say the answer is limited to that district.",
+  "The opportunity choropleth always stays the BALANCED surface. Under a lens the pins may sit off its hottest cells; when they do, say the pins follow the lens you chose while the coloured surface is the balanced opportunity — never imply they must coincide.",
+  "If rankSites returns available districts instead of picks, tell the user that neighbourhood was not found and name one or two of the real districts it returned; do not draw or imply a map. A district you filtered BY is not a place name you may attach to a pick — pick names still come only from a pick's own `place`.",
   // showBuiltCapacity is a STANDALONE display layer (built floor-area per cell, from the Overture
   // building stock), NOT part of the where-to-open sequence and NOT part of the score. Call it only
   // when the user explicitly asks about built density; it takes just the city.
@@ -839,6 +976,12 @@ export const SYSTEM_PROMPT = [
   "Never list or describe coordinates.",
   "NEVER enumerate the picks. Do not write their names, scores, populations or competitor counts as a list — every one of those is already on screen, in the panel and on the map, and repeating them is the wall of text this product exists to replace.",
   "Your two sentences must say what the MAP CANNOT: the pattern behind the answer. What do the winners have in common, and what does the competitor layer show — where is the trade clustered, and why is that leaving a gap? Name at most one place, and only if it carries the point.",
+  // Caught on the feature-007 honesty run: describing WHERE competitors cluster, the model reached
+  // for landmark names it knows ("the strip around Hermannplatz and Weserstraße") that no tool
+  // returned — the day-3 bug in a new place. Only pick `place` values are tool-backed; a competitor
+  // cluster has no name from any tool. So describe the cluster's LOCATION by direction or relation,
+  // never by a neighbourhood or landmark you know from the city.
+  "When you describe where the competition is clustered, do NOT attach a neighbourhood, landmark or street name to it — no tool returned a name for the competitor cluster, so any such name is invented. Say it by direction or relation instead ('the inner core', 'the northern half of the district', 'the centre'). The pick `place` values remain the ONLY place names you may utter.",
   "Good: 'Berlin's bakeries crowd the centre, so the openings are all on the outer residential edge — thousands of residents each, and no rival in the surrounding cells.' Bad: any sentence that reads like a table.",
   // Caught on the live run that fixed the enumeration: the model wrote "zero competition within
   // walking distance". We never measured walking. `sup` counts rivals in an h3kRing(h3_8, 1) —

@@ -1,0 +1,5 @@
+# TRUE balanced top-3, rankSql(berlin,[bakery],3), composite dem (pop+cap+addr), 2026-07-20.
+# FR-002 oracle: the default rankSites path must reproduce these exactly.
+881f18b021fffff	75.6
+881f1d4d81fffff	72.8
+881f18b023fffff	70.8
