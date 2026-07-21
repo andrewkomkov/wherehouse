@@ -19,6 +19,33 @@ Demo cities: **Berlin · Amsterdam · Belgrade**.
 
 ---
 
+## Watch it work
+
+Every frame below is the **real deployed app** at [app.slim-shaggy.com](https://app.slim-shaggy.com)
+assembling a live answer — no mockups, no stock footage. One question per city, then the follow-ups
+that make it a *consultant, not a calculator*: ask for the biggest markets, rule out the saturated
+turf, or zoom into one neighbourhood, and the pins **re-rank themselves**.
+
+### Berlin — where to open a bakery
+
+<video src="https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-berlin-final.mp4" controls poster="docs/media/demo-berlin.jpg" width="100%"></video>
+
+### Amsterdam — where to open a coffee shop
+
+<video src="https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-amsterdam-final.mp4" controls poster="docs/media/demo-amsterdam.jpg" width="100%"></video>
+
+### Belgrade — where to open a gym
+
+<video src="https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-belgrade-final.mp4" controls poster="docs/media/demo-belgrade.jpg" width="100%"></video>
+
+> Players not showing? The three clips are attached to the
+> [demo release](https://github.com/andrewkomkov/wherehouse/releases/tag/demo-2026-07-21) — click a
+> poster below to open one.
+
+[![Berlin demo](docs/media/demo-berlin.jpg)](https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-berlin-final.mp4)
+
+---
+
 ## Why this fits the theme
 
 "Where should I open this?" is an inherently spatial question. Answering it with a paragraph

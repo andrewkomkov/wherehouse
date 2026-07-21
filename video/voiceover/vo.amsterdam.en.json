@@ -1,7 +1,7 @@
 {
   "voice": "Zephyr",
   "model": "gemini-2.5-pro-preview-tts",
-  "style": "Read as a calm, confident product narrator for a short demo film. Unhurried, warm, clear. Light emphasis on the product names ClickHouse, Trigger.dev, Valhalla, and on the payoff at the end. Natural pauses between sentences.",
+  "style": "Read as a confident, energised product narrator for a short demo film — brisk, even and crystal-clear, always moving forward. Never draggy, never rushed; steady momentum with light, deliberate emphasis on the product names ClickHouse, Trigger.dev, Valhalla, on the word consultant, and on the payoff at the end. Short, clean pauses between sentences — not long ones.",
   "beats": [
     {
       "id": "ask",
@@ -9,31 +9,39 @@
     },
     {
       "id": "assemble",
-      "text": "No wall of text. A Trigger dot dev agent calls ClickHouse, tool by tool, and each result paints itself onto the map — rivals, opportunity, three top sites, a real walk catchment."
+      "text": "No wall of text. A Trigger dot dev agent calls ClickHouse, tool by tool, and every result paints itself onto the map — rivals, an opportunity surface, the three best sites, a real ten-minute walk. The model never touches the geometry; it only says what the map cannot."
     },
     {
       "id": "pick",
-      "text": "The winner is Nieuw-West — a dense residential edge with just one café anywhere nearby. The name comes from real boundary geometry. The numbers are the ones the score ranked on. And the thirteen-thousand-person walk reach? Measured by Valhalla against the actual street network. Not guessed."
+      "text": "The top site is Nieuw-West — a dense residential edge with only a handful of cafés nearby. The name is real boundary geometry, the numbers are what the score ranked on, and the walk reach was measured by Valhalla, on the actual streets. Not guessed."
     },
     {
-      "id": "reweight",
-      "text": "You don't read the answer — you argue with it. Ask for walkability; the map re-scores live."
+      "id": "lens",
+      "text": "But is that the only answer? No. This isn't a calculator — it's a consultant. Ask for the biggest markets instead, and the pins jump to the densest, most contested blocks in the city."
+    },
+    {
+      "id": "avoid",
+      "text": "Ask where NOT to open, and it flags the saturated turf — nearly two hundred cafés packed around a single block. A good consultant rules places out, too."
+    },
+    {
+      "id": "district",
+      "text": "Or narrow the whole question to one neighbourhood — the six best spots inside Amsterdam-Zuid alone, each named from real geometry, none of them invented. Local advice, from the same live data."
     },
     {
       "id": "scale",
-      "text": "And it scales. Food and drink across Amsterdam — thousands of points, too big for the chat stream's one-megabyte cap. So it never touches it: it lands in ClickHouse, read straight from the browser."
+      "text": "And it scales. Every food-and-drink venue in Amsterdam — thousands of points, too big for the chat stream's one-megabyte cap. So it never enters it: it lands in ClickHouse, read straight from the browser."
     },
     {
       "id": "compare",
-      "text": "Save a site — Postgres to ClickHouse in seconds, against seventy-five million live points."
+      "text": "Save a site — Postgres to ClickHouse in seconds, re-scored against seventy-five million live points."
     },
     {
       "id": "console",
-      "text": "One last thing — no web server. The whole app is a row in ClickHouse. Every file, a row."
+      "text": "One last thing — there's no web server. The entire app is a row in ClickHouse. Every file, a row you can query."
     },
     {
       "id": "close",
-      "text": "The agent runs on Trigger dot dev's cloud. Ask a question, get a live map — not a wall of text. Millions of points, drawn, not written. That's WhereHouse."
+      "text": "Ask a question, get a live map — not a wall of text. A consultant you can argue with, drawn from millions of points. That's WhereHouse."
     }
   ]
 }
