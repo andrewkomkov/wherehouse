@@ -17,8 +17,15 @@ warn() { printf '  \033[33m!\033[0m %-22s %s\n' "$1" "$2"; }
 
 echo "checking .env against live services…"
 
-V=$(curl -sf --max-time 20 --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT version()" 2>/dev/null)
-[[ -n "$V" ]] && ok "clickhouse (default)" "v$V" || bad "clickhouse (default)" "unreachable — service may be idle, retry once"
+# The service idles after 15 min; the first query wakes it and can exceed a single timeout.
+# CLAUDE.md: "A single timeout is not an outage." So wake-and-retry once before declaring it
+# broken — otherwise this line (and the site-ro one right after) cries wolf on a healthy cold service.
+V=$(curl -sf --max-time 25 --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT version()" 2>/dev/null)
+if [[ -z "$V" ]]; then
+    sleep 3
+    V=$(curl -sf --max-time 45 --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT version()" 2>/dev/null)
+fi
+[[ -n "$V" ]] && ok "clickhouse (default)" "v$V" || bad "clickhouse (default)" "unreachable after wake-retry — service may be down"
 
 PW=$(python3 -c "import urllib.parse,os;print(urllib.parse.quote(os.environ.get('CLICKHOUSE_SITE_PASSWORD','')))")
 R=$(curl -sf --max-time 20 "$CLICKHOUSE_URL/?user=${CLICKHOUSE_SITE_USER}&password=${PW}" --data-binary "SELECT count() FROM web.pages" 2>/dev/null)
@@ -36,7 +43,11 @@ else
     bad "postgres (oltp)" ".secrets/pg-ca.crt missing — GET /postgres/{id}/caCertificates"
 fi
 
-C=$(curl -sf --max-time 20 --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT count() FROM oltp.pg_saved_sites" 2>/dev/null)
+# FINAL + _peerdb_is_deleted=0 is the true live count: the target is a (Shared)ReplacingMergeTree,
+# so a raw count() includes un-merged duplicate versions and tombstones and reads HIGHER than
+# Postgres on a perfectly healthy pipe (measured 2026-07-21: raw 22 vs 2 live). Counting raw is a
+# false "slot died" alarm; the FINAL count is what matches Postgres.
+C=$(curl -sf --max-time 20 --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT count() FROM oltp.pg_saved_sites FINAL WHERE _peerdb_is_deleted=0" 2>/dev/null)
 if [[ -n "$C" && -n "${P:-}" ]]; then
     [[ "$C" == "$P" ]] && ok "clickpipes cdc" "$C rows, in sync with postgres" \
                        || warn "clickpipes cdc" "pg=$P ch=$C — lag, or the slot died. See ADR-004 (resync)."
