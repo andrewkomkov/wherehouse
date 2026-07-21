@@ -24,22 +24,22 @@ Demo cities: **Berlin · Amsterdam · Belgrade**.
 Every frame is the **real deployed app** at [app.slim-shaggy.com](https://app.slim-shaggy.com)
 assembling a live answer — no mockups, no stock footage. One question per city, then the follow-ups
 that make it a *consultant, not a calculator*: ask for the biggest markets, rule out the saturated
-turf, or zoom into one neighbourhood, and the pins **re-rank themselves**. **Click a still to play**
-(~2 min each):
+turf, or zoom into one neighbourhood, and the pins **re-rank themselves**. **Click a still to watch
+on YouTube** (~2 min each):
 
 ### Berlin — where to open a bakery
 
-[![Berlin demo — click to play](docs/media/demo-berlin.jpg)](https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-berlin-final.mp4)
+[![Berlin demo — click to play](docs/media/demo-berlin.jpg)](https://youtu.be/HQ6T2WPsu3o)
 
 ### Amsterdam — where to open a coffee shop
 
-[![Amsterdam demo — click to play](docs/media/demo-amsterdam.jpg)](https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-amsterdam-final.mp4)
+[![Amsterdam demo — click to play](docs/media/demo-amsterdam.jpg)](https://youtu.be/jv_b7LEWCyk)
 
 ### Belgrade — where to open a gym
 
-[![Belgrade demo — click to play](docs/media/demo-belgrade.jpg)](https://github.com/andrewkomkov/wherehouse/releases/download/demo-2026-07-21/wherehouse-belgrade-final.mp4)
+[![Belgrade demo — click to play](docs/media/demo-belgrade.jpg)](https://youtu.be/b-Ey7hIeZvQ)
 
-> All three clips also live on the
+> Prefer the raw files? All three are attached to the
 > [demo release](https://github.com/andrewkomkov/wherehouse/releases/tag/demo-2026-07-21).
 
 ---
