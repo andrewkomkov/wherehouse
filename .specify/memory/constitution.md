@@ -44,9 +44,14 @@ the user. Never present a hypothesis in the register of a fact.
 claim; "it looks right" is not a verification. On day 3 the agent was corrected for naming
 three Berlin districts it could not know — and the same defect was then found in the spec
 that corrected it: *"Mariendorf, Hellersdorf, Köpenick"* had been eyeballed from coordinates
-and written down as measured fact. All three were wrong (truth: Lichtenrade, Biesdorf,
-Mahlsdorf). It survived because the reference SQL returned no names, so nothing we ran could
-contradict it.
+and written down as measured fact. All three were wrong (the day-3 truth, under the two-factor
+score of the time, was Lichtenrade, Biesdorf, Mahlsdorf). It survived because the reference SQL
+returned no names, so nothing we ran could contradict it.
+
+*(Freshness note, 2026-07-21: composite demand later re-ranked the surface, so re-running the
+berlin/bakery query today yields Lichtenrade, Biesdorf and a third Tempelhof cell — not Mahlsdorf.
+The day-3 record above is true as of its timestamp; this note exists so the example itself does not
+become the stale "verified" number this very principle warns about.)*
 
 Two rules follow, and they are the expensive part of this principle:
 
@@ -174,7 +179,12 @@ Reviews verify compliance. Complexity must be justified against Principle VI.
 Runtime guidance for agents lives in `CLAUDE.md`; where `CLAUDE.md` and this constitution
 disagree, this file wins and `CLAUDE.md` gets fixed.
 
-**Version**: 1.2.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-17
+**Version**: 1.2.1 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-21
+
+*1.2.1 — Added a freshness note to Principle II's day-3 example: composite demand re-ranked the
+surface, so the illustrative "Lichtenrade, Biesdorf, Mahlsdorf" top-3 no longer reproduces. The
+example was itself becoming the stale verified number the principle warns about; caught by a live
+validation pass.*
 
 *1.2.0 — Added Principle VII: work is executed through agents orchestrated from a script, and
 every deliverable is reproducible by one command. Generalises IV (infra is code) to all work.*

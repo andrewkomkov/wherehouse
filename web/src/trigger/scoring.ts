@@ -165,9 +165,14 @@ function candidateCells(city: CityName, categories: string[]): string {
 }
 
 /**
- * Total order. The p95 clamp legitimately ties cells at the ceiling (measured: three Berlin
- * cells at exactly 100.0 — the bakery top-3 is *entirely* ties), so without the `cell` tiebreak
- * the "top 3" could reorder between two runs of the same question. (FR-004)
+ * Total order. The p95 clamp legitimately ties cells — two cells that both saturate a term land on
+ * the same `gap` — so without the `cell` tiebreak the "top 3" could reorder between two runs of the
+ * same question. (FR-004)
+ *
+ * (Historical note: an earlier comment here cited "three Berlin bakery cells at exactly 100.0". That
+ * was the two-factor era; since composite demand folded in (built floor-area + address density),
+ * berlin/bakery tops out at gap ~75.6, not 100. The tiebreak is still load-bearing — ties happen at
+ * any ceiling, not only at 100 — the illustrative number just moved. Re-verified live 2026-07-21.)
  *
  * Qualified with the `s.` alias because rankSql now LEFT JOINs geo.districts, and `gap`/`pop`
  * would otherwise be ambiguous.
