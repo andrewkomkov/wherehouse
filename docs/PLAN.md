@@ -346,6 +346,14 @@ If we are writing code on day 7, something went wrong on day 2.
 
 ## Researched feature backlog — all requested 17 July → **all shipped and verified in-browser**
 
+**UPDATE (21 July): F007 "consultant ranking variety" shipped and deployed to prod.** `rankSites`
+now varies the answer along four axes — strategy lens (balanced/demand/low_competition/accessible),
+best/worst order (where NOT to open), a district filter, and up to six pins with paging — all over
+the same scored CTE; the balanced default is byte-for-byte unchanged (FR-002). Spec:
+[`specs/007-consultant-ranking-variety/`](../specs/007-consultant-ranking-variety/). Verified live
+(SQL + headless `chat.agent()` + a browser flicker/6-pin probe against the deployed app) and pushed
+to prod via `deploy-trigger.sh` + `deploy-app.sh`.
+
 **STATUS (17 July): F1–F5 are built, browser-verified, and merged to `main`.** Each went through a
 spec + an agent workflow (constitution VII), each gate (typecheck + `verify:score` + shellcheck)
 green, each adversarial-review finding fixed. Final CI-equivalent sweep passed: gitleaks clean over

@@ -59,10 +59,15 @@ and streamed straight to the browser.
 
 ### Trigger.dev `chat.agent()` orchestrates the whole answer
 
-- The agent exposes **13 tools**. Seven build the answer (`findCompetitors`, `scoreArea`,
-  `rankSites`, `showCatchment`, `categoryTrend`, `saveSite`, `compareSavedSites`); six let the
-  agent **operate the UI itself** (toggle layers, move the re-weight sliders, focus a pick,
-  highlight the best/worst cell, rewind to a past run, export a PDF).
+- The agent exposes **14 tools**. Eight build the answer (`findCompetitors`, `scoreArea`,
+  `showBuiltCapacity`, `rankSites`, `showCatchment`, `categoryTrend`, `saveSite`,
+  `compareSavedSites`); six let the agent **operate the UI itself** (toggle layers, move the
+  re-weight sliders, focus a pick, highlight the best/worst cell, rewind to a past run, export
+  a PDF).
+- **`rankSites` is a consultant, not a fixed top-3.** Beyond the balanced best three it ranks
+  under a strategy lens (biggest market / least competition / best foot traffic), shows where
+  *not* to open (the most saturated cells), ranks inside a named district, and pages up to six
+  pins — all over the same scored cells, with the balanced default unchanged.
 - **The progressive map is the innovation.** Each tool emits a `data-map` part with a *stable
   id*; re-writing that id **updates the part in place** instead of appending. That is what
   makes the map fill in wave by wave while the agent is still working, instead of appearing all

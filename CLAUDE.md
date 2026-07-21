@@ -45,27 +45,34 @@ Two traps this script exists to catch:
 [`docs/PLAN.md`](docs/PLAN.md) is the day-by-day plan to the deadline, what's explicitly
 cut, and the risk register. **Read it before deciding what to work on.**
 
-Effective code time ends **21 July evening** (deadline 23 July 12:00 UTC, minus video and
-the flip to public). That's four working days, not six.
+The full answer flow is **built and live in prod** — both the Trigger.dev agent
+(`./infra/deploy-trigger.sh`) and the static UI (`./infra/deploy-app.sh`) are deployed, so
+https://app.slim-shaggy.com works with no local process running. `chat.agent()` behaves as
+documented (ADR-001 proven live on day 2: two writes to one `id` produced `parts=1`, content
+changed — parts merge on `type`+`id`, last write wins). The day-3 answer flow plus the whole
+F1–F5 backlog shipped and were browser-verified; specs are in `specs/`.
 
-**Day 2 is done and its gate passed** — `chat.agent()` behaves as documented. Two writes to
-one `id` produced `parts=1` with the content changed: parts merge on `type`+`id`, last write
-wins. ADR-001 is proven, not assumed, and the project's biggest risk is retired. The
-skeleton lives in `web/` (`pnpm dev` + `pnpm exec trigger dev`).
+The agent exposes **14 tools** (`web/src/trigger/chat.ts`): eight build the map/data answer
+(`findCompetitors`, `scoreArea`, `showBuiltCapacity`, `rankSites`, `showCatchment`,
+`saveSite`, `compareSavedSites`, `categoryTrend`) and six let it drive the UI itself
+(`setLayer`, `reweight`, `focusPick`, `highlightExtreme`, `reviewRun`, `exportReport`).
 
-**Next: day 3 — the real answer flow** (`/speckit-specify`). Two things day 2 hands it:
+**Latest: feature 007 — consultant ranking variety** (`specs/007-consultant-ranking-variety/`),
+shipped and deployed to prod (agent + UI). `rankSites` is no longer a fixed balanced top-3: it
+takes optional `strategy` (balanced|demand|low_competition|accessible), `order` (best|worst =
+where to avoid, saturated), `district` (rank within one neighbourhood, e.g. Neukölln), and
+`count`/`page` (up to 6 pins, paging) — all over the SAME scored candidate-cell CTE. The
+balanced default is byte-for-byte unchanged (FR-002).
 
-1. **The chat stream has a hard ~1 MiB per-record cap, and we already exceed it.** It
-   applies to `data-map` parts. Berlin food & drink is 1.27 MiB, res-9 choropleth ~2.2 MiB
-   ⇒ `ChatChunkTooLargeError` and a dead run. Narrow queries are fine; *"show me every
-   restaurant"* is not. Fix = stream a handle, let the browser fetch GeoJSON straight from
-   ClickHouse (ADR-003 proved it serves HTTP with CORS open). Design it in, don't retrofit.
-2. `showSavedSites` in `web/src/trigger/chat.ts` is scaffolding — it double-writes on
-   purpose to exercise the gate. Do not let that survive into real tools.
-3. **Demand is now real.** `geo.population` holds Kontur Population — 475k H3 res-8 cells,
-   natively the same unit as `geo.places.h3_8`, so the GAP score joins on equality with no
-   interpolation. `./infra/load-population.sh` (re)loads and verifies it. Attribution
-   (Kontur, CC BY) is **required** wherever the map is shown.
+Two design facts that still bind (retired as risks, kept as constraints):
+
+1. **The chat stream caps a single record at ~1 MiB**, `data-map` parts included. The handle
+   path — browser fetches GeoJSON straight from ClickHouse (ADR-003 proved CORS-open HTTP) — is
+   live and carries every over-budget layer. Never stream a wide layer inline. See trap 8 / ADR-001.
+2. **Demand is real.** `geo.population` holds Kontur Population — 475k H3 res-8 cells, natively
+   the same unit as `geo.places.h3_8`, so the GAP score joins on equality with no interpolation.
+   `./infra/load-population.sh` (re)loads and verifies it. Attribution (Kontur, CC BY) is
+   **required** wherever the map is shown.
 
 ## Spec-Driven Development — MANDATORY
 
