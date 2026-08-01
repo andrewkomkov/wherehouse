@@ -6,8 +6,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 if [[ ! -f .env ]]; then echo "✗ no .env — copy .env.example and fill it in"; exit 1; fi
 
-# NB: POSTGRES_URL must be quoted inside .env — an unquoted & aborts the parse and
-# silently drops every line below it. That cost us a confusing "key MISSING" once.
+# NB: any value containing `&` must be QUOTED inside .env — unquoted, it aborts the parse and
+# silently drops every line below it. That cost us a confusing "key MISSING" once, on the
+# POSTGRES_URL that used to live here.
 set -a; source .env; set +a
 
 pass=0; fail=0
@@ -35,24 +36,22 @@ O=$(curl -sf --max-time 20 -u "$CLICKHOUSE_API_KEY_ID:$CLICKHOUSE_API_KEY_SECRET
     | python3 -c "import sys,json;print(json.load(sys.stdin)['result'][0]['id'])" 2>/dev/null)
 [[ -n "$O" ]] && ok "cloud api" "org $O" || bad "cloud api" "key rejected"
 
-PSQL=psql; command -v psql >/dev/null || PSQL=/opt/homebrew/opt/libpq/bin/psql
-if [[ -f .secrets/pg-ca.crt ]]; then
-    P=$("$PSQL" "$POSTGRES_URL" -t -A -c "SELECT count(*) FROM saved_sites;" 2>/dev/null)
-    [[ -n "$P" ]] && ok "postgres (oltp)" "saved_sites: $P" || bad "postgres (oltp)" "unreachable — check CA cert / instance state"
-else
-    bad "postgres (oltp)" ".secrets/pg-ca.crt missing — GET /postgres/{id}/caCertificates"
-fi
+# The saved-site store (ADR-005). Two things worth proving separately: the PUBLIC read the
+# panel does (as `site`, which needs the GRANT) and the WRITE the Worker does (as
+# `app_writer`). Both are read-only here — a failed INSERT grant shows up as a missing
+# privilege on the SELECT the writer is also granted.
+S=$(curl -sf --max-time 20 "$CLICKHOUSE_URL/?user=${CLICKHOUSE_SITE_USER}&password=${PW}" \
+    --data-binary "SELECT count() FROM app.saved_sites FINAL" 2>/dev/null)
+[[ -n "$S" ]] && ok "saved sites (site ro)" "app.saved_sites: $S row(s)" \
+               || bad "saved sites (site ro)" "unreadable as '$CLICKHOUSE_SITE_USER' — GRANT missing? (db/clickhouse/014_saved_sites.sql)"
 
-# FINAL + _peerdb_is_deleted=0 is the true live count: the target is a (Shared)ReplacingMergeTree,
-# so a raw count() includes un-merged duplicate versions and tombstones and reads HIGHER than
-# Postgres on a perfectly healthy pipe (measured 2026-07-21: raw 22 vs 2 live). Counting raw is a
-# false "slot died" alarm; the FINAL count is what matches Postgres.
-C=$(curl -sf --max-time 20 --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT count() FROM oltp.pg_saved_sites FINAL WHERE _peerdb_is_deleted=0" 2>/dev/null)
-if [[ -n "$C" && -n "${P:-}" ]]; then
-    [[ "$C" == "$P" ]] && ok "clickpipes cdc" "$C rows, in sync with postgres" \
-                       || warn "clickpipes cdc" "pg=$P ch=$C — lag, or the slot died. See ADR-004 (resync)."
+if [[ -n "${CLICKHOUSE_APP_WRITER_PASSWORD:-}" ]]; then
+    W=$(curl -sf --max-time 20 --user "${CLICKHOUSE_APP_WRITER_USER:-app_writer}:$CLICKHOUSE_APP_WRITER_PASSWORD" \
+        "$CLICKHOUSE_URL/" --data-binary "SELECT count() FROM app.saved_sites FINAL" 2>/dev/null)
+    [[ -n "$W" ]] && ok "app_writer" "authenticates, reaches app.saved_sites" \
+                  || bad "app_writer" "cannot reach app.saved_sites — the Worker's save endpoint is broken"
 else
-    bad "clickpipes cdc" "oltp.pg_saved_sites unreadable"
+    bad "app_writer" "CLICKHOUSE_APP_WRITER_PASSWORD unset in .env"
 fi
 
 [[ -n "$TRIGGER_SECRET_KEY" ]] && ok "trigger.dev key" "${TRIGGER_SECRET_KEY:0:8}… (not validated)" || bad "trigger.dev key" "unset"

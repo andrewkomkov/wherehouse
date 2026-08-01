@@ -28,46 +28,17 @@ PY
 )"
 
 echo
-echo "── Managed Postgres (OLTP) ──────────────────────────────"
-api GET "/organizations/$ORG/postgres" | python3 -c "$(cat <<'PY'
-import sys, json
-rows = json.load(sys.stdin)["result"]
-if not rows:
-    print("  (none)")
-for p in rows:
-    print(f'  {p["name"]:<24} {p["state"]:<10} pg{p["postgresVersion"]:<3} '
-          f'{p["size"]:<14} {p["storageSize"]}GB  ha={p["haType"]}')
-    # hostname is only present on GET-by-id / create, not in the list response
-    if p.get("hostname"):
-        print(f'  {"":<24} {p["hostname"]}')
-PY
-)"
-
-echo
-echo "── ClickPipes (CDC) ─────────────────────────────────────"
-SVC="$(api GET "/organizations/$ORG/services" | jq_r "['result'][0]['id']")"
-api GET "/organizations/$ORG/services/$SVC/clickpipes" 2>/dev/null | python3 -c "$(cat <<'PY'
-import sys, json
-try:
-    rows = json.load(sys.stdin)["result"]
-except Exception:
-    rows = []
-if not rows:
-    print("  (none)")
-for p in rows:
-    src = next(iter(p.get("source", {})), "?")
-    dst = p.get("destination", {}).get("database", "?")
-    print(f'  {p["name"]:<24} {p["state"]:<12} {src} -> {dst}')
-PY
-)"
-
-echo
-echo "── CDC freshness ────────────────────────────────────────"
+echo "── Saved sites (app.saved_sites — the OLTP side, ADR-005) ──"
+# Was: managed Postgres + a ClickPipes CDC pipe + a CDC-freshness check that compared the two
+# row counts. One store now, so there is nothing to compare — just the live count. FINAL
+# collapses ReplacingMergeTree versions; a raw count() reads high until a merge runs.
 if [[ -n "${CLICKHOUSE_PASSWORD:-}" && -n "${CLICKHOUSE_URL:-}" ]]; then
     curl -s --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "
-      SELECT concat('  ', name, ': ', toString(total_rows), ' rows')
-      FROM system.tables WHERE database='oltp' AND name LIKE 'pg_%'
-      ORDER BY name FORMAT TSVRaw" 2>/dev/null || echo "  (clickhouse unreachable)"
+      SELECT concat('  ', toString(count()), ' saved site(s), newest ', toString(max(created_at)))
+      FROM app.saved_sites FINAL FORMAT TSVRaw" 2>/dev/null || echo "  (clickhouse unreachable)"
+    curl -s --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "
+      SELECT concat('  grants: ', arrayStringConcat(groupArray(concat(user_name, ' -> ', access_type)), ', '))
+      FROM system.grants WHERE database = 'app' AND table = 'saved_sites' FORMAT TSVRaw" 2>/dev/null
 else
     echo "  (CLICKHOUSE_URL / CLICKHOUSE_PASSWORD unset in .env)"
 fi
@@ -111,8 +82,12 @@ if [[ -n "${CLICKHOUSE_PASSWORD:-}" && -n "${CLICKHOUSE_URL:-}" ]]; then
       SELECT concat('  web.assets: ', toString(count()), ' files, ', formatReadableSize(sum(length(body))), ' total, newest ', toString(max(updated_at)))
       FROM web.assets FORMAT TSVRaw" 2>/dev/null
 fi
-if command -v wrangler >/dev/null 2>&1 && wrangler whoami >/dev/null 2>&1; then
-    echo "  $(wrangler hyperdrive list 2>/dev/null | grep -c wherehouse-pg-hyperdrive || echo 0) Hyperdrive config(s) named wherehouse-pg-hyperdrive"
-else
-    echo "  (wrangler not authenticated — 'wrangler login' to check Hyperdrive/cert state)"
+# The Worker's save endpoint. This script is read-only, so it does NOT exercise the write —
+# it only checks the route is live, by GETting a POST-only path (any HTTP code means the
+# Worker answered; 000 means it is down). Proving the write itself needs a row written, which
+# is `./infra/deploy-app.sh verify`'s job.
+if command -v curl >/dev/null 2>&1; then
+    save_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://app.slim-shaggy.com/api/save-site 2>/dev/null || echo "000")"
+    echo "  GET /api/save-site -> HTTP $save_code (POST-only endpoint; anything but 000 means it is routed)"
+    echo "  (the real write round-trip is ./infra/deploy-app.sh verify — it writes a canary and deletes it)"
 fi

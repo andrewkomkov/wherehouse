@@ -16,11 +16,14 @@ agent tool returns real data → the deployed `chat.agent()` runs the whole chai
 code → the hard hackathon rules hold.
 
 ## 1. Infra is alive
-`./infra/check-env.sh` (all creds vs live services) and `./infra/status.sh` (ClickHouse/Postgres/
-ClickPipe state, versions, CDC freshness). **Known false alarm:** check-env flags CDC "lag" by comparing
-RAW ReplacingMergeTree row counts (`oltp.pg_saved_sites` = 11) to Postgres (2). That is NOT a lag —
-`SELECT count() FROM oltp.pg_saved_sites FINAL WHERE _peerdb_is_deleted=0` = 2, matching Postgres. The
-raw count includes old versions + tombstones. The pipe is healthy if `status.sh` shows it `Running`.
+`./infra/check-env.sh` (all creds vs live services) and `./infra/status.sh` (service state, versions,
+saved-site count). Both cover the two SQL identities the saved-site path needs: `site` (public,
+readonly — must be able to SELECT `app.saved_sites`, which needs the GRANT) and `app_writer` (the
+Worker's INSERT credential). **Always count with `FINAL`:** the table is a ReplacingMergeTree, so a raw
+`count()` includes superseded versions and reads high. This once produced a false "CDC lag" alarm
+against the old `oltp.pg_saved_sites` (raw 11 vs 2 live); the trap survives its cause.
+
+There is no managed Postgres and no ClickPipe to check any more — retired 2026-08-01, ADR-005.
 
 ## 2. Every agent tool returns real data (deterministic, no LLM spend)
 Reproduce each tool's SQL directly against ClickHouse and confirm it returns plausible rows matching the
@@ -36,7 +39,9 @@ documented measurements. Source `.env`, then `curl --user "default:$CLICKHOUSE_P
 - `showCatchment` → lobes=1, reachablePeople≈14,780.
 - `categoryTrend` → the `geo.category_momentum` MV (bakery −5.2, cafe +10.8, since 2022).
 - affinity (`geo.affinity_dict`) → real complementary neighbours per pick.
-- saved-sites join → `oltp.pg_saved_sites FINAL` re-scored against today's `scored` surface.
+- saved-sites join → `app.saved_sites FINAL` re-scored against today's `scored` surface. The write
+  path is worth proving separately, and non-destructively: `./infra/deploy-app.sh verify` POSTs a
+  canary through the deployed Worker, reads it back as the *public* `site` user, then deletes it.
 ⚠️ **H3 is lat-first** — `h3ToGeo(h3).1` is LATITUDE. A swapped bbox returns ZERO rows with no error.
 
 ## 3. The DEPLOYED chat.agent() runs the whole chain (the crown-jewel check)

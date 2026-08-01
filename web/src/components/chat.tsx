@@ -303,37 +303,30 @@ async function fetchPickWeb(city: string, h3: string, signal: AbortSignal): Prom
 }
 
 // The user is `u1` everywhere in this demo — no auth yet. Matches DEMO_USER_ID in
-// trigger/chat.ts and "u1" in infra/app-worker/src/postgres.ts (the write side).
+// trigger/chat.ts and "u1" in infra/app-worker/src/saved-sites.ts (the write side).
 const CH_DEMO_USER_ID = "u1";
 
 /**
- * The saved-history panel's read path (feature 003, hackathon-alignment fix day 6): straight out
- * of the ClickPipes CDC replica (ADR-004, `oltp.pg_saved_sites` JOIN `oltp.pg_shortlists`), never
- * Postgres directly. Browser-direct-to-Cloud, same posture as `fetchLayer` above — `site` now also
- * holds `GRANT SELECT ON oltp.pg_saved_sites/pg_shortlists` (db/clickhouse/010_oltp_grants.sql).
+ * The saved-history panel's read path (feature 003): straight out of `app.saved_sites`,
+ * browser-direct-to-Cloud, same posture as `fetchLayer` above — `site` holds
+ * `GRANT SELECT ON app.saved_sites` (db/clickhouse/014_saved_sites.sql).
  *
- * `FINAL` on both tables collapses their `SharedReplacingMergeTree` versions to the latest one
- * per id before the filter runs; both `_peerdb_is_deleted = 0` filters drop rows tombstoned by a
- * Postgres DELETE — without either, an edited or deleted site can reappear (ADR-004).
+ * `FINAL` collapses the `ReplacingMergeTree`'s versions to the latest `updated_at` per row before
+ * the filter runs, so an edited site is never read at a stale version.
  *
- * At `syncIntervalSeconds=10` a just-saved site will not show up here for several seconds — see
- * `savePick`'s optimistic local insert below, which is what makes the panel feel instant anyway.
- *
- * `score` is `Float32` on the currently-running pipe (not `Nullable`): its `allowNullableColumns`
- * setting is `false` and is NOT PATCH-able after creation (verified live 2026-07-18 — PATCH
- * echoes back the unchanged old value, same "accepted but ignored" shape as Postgres `size`), so
- * a Postgres NULL score would collapse to 0.0 here. This is latent, not active, today: `savePick`
- * always sends a real numeric score (`p.gap`), never null — see its comment below. Any FUTURE
- * pipe `infra/provision.sh` creates now sets `allowNullableColumns: true`.
+ * Until 2026-08-01 this read the ClickPipes CDC replica of managed Postgres (ADR-004,
+ * `oltp.pg_saved_sites` JOIN `oltp.pg_shortlists`, plus a `_peerdb_is_deleted = 0` tombstone
+ * filter on each). ADR-005 made ClickHouse the only store: one table, no join, no tombstones, and
+ * a save is visible to the very next read instead of ~10 s behind it. `score` is genuinely
+ * `Nullable(Float32)` now — the pipe's `allowNullableColumns: false` used to collapse a NULL score
+ * to 0.0, against the project's absent-≠-0 invariant.
  */
 async function fetchSavedSitesFromClickHouse(): Promise<SavedSiteRow[]> {
   const query = `
-    SELECT ss.id, ss.shortlist_id, ss.label, ss.lon, ss.lat, ss.h3_8, ss.score, ss.status,
-           sl.city, sl.business_type, ss.created_at
-    FROM oltp.pg_saved_sites AS ss FINAL
-    JOIN oltp.pg_shortlists AS sl FINAL ON sl.id = ss.shortlist_id
-    WHERE ss.user_id = '${CH_DEMO_USER_ID}' AND ss._peerdb_is_deleted = 0 AND sl._peerdb_is_deleted = 0
-    ORDER BY ss.created_at DESC
+    SELECT id, label, lon, lat, h3_8, score, status, city, business_type, created_at
+    FROM app.saved_sites FINAL
+    WHERE user_id = '${CH_DEMO_USER_ID}'
+    ORDER BY created_at DESC
     FORMAT JSON`;
   const params = new URLSearchParams({ user: CH_USER, password: CH_PASS, query });
   const res = await fetch(`${CH_URL}/?${params}`);
@@ -672,8 +665,8 @@ export function Chat() {
   });
 
   // `id` is the chatId the transport keys sessions on (its accessToken/startSession callbacks
-  // receive the same value). Saving a pick from the client threads it through so the save lands
-  // under the same shortlist scope as the conversation.
+  // receive the same value). Saving a pick from the client still threads it through the request,
+  // but a saved site is keyed on (user, city, trade) only — see the Worker's handleSaveSite.
   const { messages, sendMessage, setMessages, status, id: chatId } = useChat<Msg>({ transport });
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -727,21 +720,19 @@ export function Chat() {
    */
   const [resumed, setResumed] = useState(false);
   /**
-   * The user's saved history (feature 003), read from ClickHouse (`fetchSavedSitesFromClickHouse`,
-   * the ClickPipes CDC replica of Postgres — hackathon-alignment fix, day 6: ClickHouse must be
-   * the primary read path, not Postgres directly). Loaded on mount and after every save — it
-   * survives a reload because the data lives in ClickHouse (fed by CDC from Postgres), not in this
-   * component. Today's market gap is NOT here (never scored at save time); that arrives on the
-   * `saved` map layer once compareSavedSites runs, and the panel joins the two by coordinate below.
+   * The user's saved history (feature 003), read from ClickHouse (`fetchSavedSitesFromClickHouse`
+   * — `app.saved_sites`, the only store since ADR-005). Loaded on mount and after every save; it
+   * survives a reload because the data lives in ClickHouse, not in this component. Today's market
+   * gap is NOT here (never scored at save time); that arrives on the `saved` map layer once
+   * compareSavedSites runs, and the panel joins the two by coordinate below.
    */
   const [savedSites, setSavedSites] = useState<SavedSiteRow[]>([]);
   /**
-   * Just-saved sites the ClickHouse read (above `savedSites`) does not know about yet, because
-   * CDC has a ~10s `syncIntervalSeconds` lag. `savePick` appends one here the instant a save
-   * succeeds, so the panel updates immediately instead of waiting on replication — an optimistic
-   * local insert, not a fake read: it is dropped (see `reloadSaved`) the moment the real
-   * ClickHouse row for the same `h3_8` shows up, so ClickHouse is still the one source of truth
-   * a reload returns to.
+   * A just-saved site, shown before the re-read that confirms it. This used to bridge a real ~10 s
+   * CDC replication lag; writing straight to ClickHouse removed the lag, so it is now only a guard
+   * against the re-read racing the write. Still an optimistic local insert, not a fake read: it is
+   * dropped (see `reloadSaved`) the moment the real ClickHouse row for the same `h3_8` shows up,
+   * so ClickHouse is the one source of truth a reload returns to.
    */
   const [optimisticSaves, setOptimisticSaves] = useState<SavedSiteRow[]>([]);
   /** Picks whose save is in flight, keyed by h3 — for the row's transient "saving…" state. */
@@ -883,7 +874,7 @@ export function Chat() {
   /**
    * The city + category THIS answer is about, recovered from the picks layer's own label
    * (`top {n} for {category} in {city}`, set in trigger/chat.ts). A save has to carry the same
-   * (city, category) the agent's saveSite would — the shortlist is keyed on them — and this is the
+   * (city, category) the agent's saveSite would — a saved site is keyed on them — and this is the
    * one place the pair is stated verbatim on the client. `category` may be a group ("food and
    * drink"), which contains no " in " and so survives the greedy split unharmed.
    */
@@ -966,7 +957,7 @@ export function Chat() {
   }, [answerMeta]);
 
   /**
-   * Today's market gap per saved site, keyed by rounded coordinate — the join between the Postgres
+   * Today's market gap per saved site, keyed by rounded coordinate — the join between the saved
    * list (authoritative, no score) and the `saved` map layer (compareSavedSites re-scored it).
    * Both sides derive lon/lat from the same stored double, so 5-decimal keys match. `marketGap` is
    * absent for a site outside today's scored set (the SQL drops the key — absent != 0).
@@ -983,8 +974,8 @@ export function Chat() {
   }, [signature, storeVersion]);
 
   /**
-   * `savedSites` (ClickHouse, authoritative) with any not-yet-replicated `optimisticSaves`
-   * appended in front — deduped by `h3_8` so a site never shows twice once CDC catches up.
+   * `savedSites` (ClickHouse, authoritative) with any not-yet-confirmed `optimisticSaves`
+   * appended in front — deduped by `h3_8` so a site never shows twice once the re-read lands.
    * This, not `savedSites` alone, is what the panel renders below.
    */
   const displaySavedSites = useMemo(() => {
@@ -1010,8 +1001,8 @@ export function Chat() {
     }
   }, []);
 
-  // Load the history once, on mount. It is ClickHouse-backed (via CDC from Postgres), so this is
-  // what makes it survive reload.
+  // Load the history once, on mount. It lives in ClickHouse, which is what makes it survive
+  // reload.
   useEffect(() => {
     void reloadSaved();
   }, [reloadSaved]);
@@ -1040,14 +1031,13 @@ export function Chat() {
         return n;
       });
       if (res.ok) {
-        // Show it immediately — CDC has not replicated this write to ClickHouse yet (~10s sync
-        // interval). This is the real Postgres id `saveSiteAction` just returned, not a fake one;
-        // `reloadSaved`'s CH read drops this optimistic entry the instant the same `h3_8` shows up
-        // there, so ClickHouse remains the one authoritative source, just not an instant one.
+        // Show it immediately. This is the real `app.saved_sites` id the Worker just inserted, not
+        // a fake one; `reloadSaved`'s CH read drops this optimistic entry the instant the same
+        // `h3_8` comes back from ClickHouse, which — writing there directly — is normally the very
+        // next read.
         setOptimisticSaves((prev) => [
           {
             id: res.id,
-            shortlist_id: -1, // unknown client-side (the Worker resolves/creates it); never rendered
             label: p.place ?? "saved site",
             lon,
             lat,
@@ -1060,12 +1050,10 @@ export function Chat() {
           },
           ...prev,
         ]);
+        // Settles the panel onto the real ClickHouse row straight away. There used to be a second,
+        // delayed re-read here to wait out CDC replication; with the write landing in ClickHouse
+        // itself there is nothing left to wait for.
         void reloadSaved();
-        // One reconciling re-read after CDC has plausibly caught up, so the panel settles onto
-        // the ClickHouse row (and its real shortlist_id) without needing a page reload.
-        setTimeout(() => {
-          void reloadSaved();
-        }, 15_000);
       } else {
         setError(`save: ${res.error}`);
       }
@@ -1692,7 +1680,7 @@ export function Chat() {
     [busy, sendMessage, phase],
   );
 
-  /** Clear the session and the map — the top-bar ⟲. Wipes client state; Postgres history is kept. */
+  /** Clear the session and the map — the top-bar ⟲. Wipes client state; saved history is kept. */
   const resetSession = useCallback(() => {
     gen.current++;
     store.current = {};
@@ -2792,10 +2780,10 @@ export function Chat() {
           </section>
         )}
 
-        {/* Saved history. Like Top picks, no saves ⇒ no heading. ClickHouse-backed (via CDC from
-            Postgres), survives reload; today's market gap is joined in from the compareSavedSites
-            layer by coordinate. A just-made save shows instantly via `optimisticSaves` even though
-            CDC hasn't replicated it yet — see `displaySavedSites`. */}
+        {/* Saved history. Like Top picks, no saves ⇒ no heading. ClickHouse-backed, survives
+            reload; today's market gap is joined in from the compareSavedSites layer by coordinate.
+            A just-made save shows instantly via `optimisticSaves`, before the confirming re-read
+            lands — see `displaySavedSites`. */}
         {displaySavedSites.length > 0 && (
           <section>
             <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>

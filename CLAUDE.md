@@ -20,8 +20,8 @@ plus live verification against our own ClickHouse service.
 ./infra/check-env.sh    # verifies every credential against the live services, ~5s
 ```
 
-Everything is in `.env` (gitignored): ClickHouse, the public read-only `site` user,
-the Cloud API key, managed Postgres, Trigger.dev. `.secrets/pg-ca.crt` holds the Postgres CA.
+Everything is in `.env` (gitignored): ClickHouse, the public read-only `site` user, the narrow
+`app_writer` user, the Cloud API key, Trigger.dev.
 
 `ANTHROPIC_API_KEY` **is set** and points at DeepSeek via `ANTHROPIC_BASE_URL`
 (`deepseek-v4-flash` — DeepSeek speaks the Anthropic wire format, so `@ai-sdk/anthropic` works
@@ -35,8 +35,9 @@ committed against our own stale doc rather than a vendor's. Stale docs lie like 
 do.)*
 
 Two traps this script exists to catch:
-- **`POSTGRES_URL` must stay quoted in `.env`** — an unquoted `&` aborts `source .env` and
-  silently drops every line below it (looked exactly like a missing Trigger.dev key).
+- **Any `.env` value containing `&` must stay quoted** — unquoted, it aborts `source .env` and
+  silently drops every line below it (looked exactly like a missing Trigger.dev key; the culprit
+  was the since-retired `POSTGRES_URL`).
 - The ClickHouse service **idles after 15 min**; the first query wakes it and may be slow.
   A single timeout is not an outage.
 
@@ -135,18 +136,17 @@ Quick SQL check:
 curl -s --user "default:$CLICKHOUSE_PASSWORD" "$CLICKHOUSE_URL/" --data-binary "SELECT version()"
 ```
 
-**ClickHouse-managed Postgres** — `wherehouse-oltp`, pg18, eu-west-1, OLTP side of
-ADR-004. Credentials in `.env`. **`psql` needs the CA cert**, `sslmode=require` alone
-fails verification:
+**Saved sites** — `app.saved_sites` in the same ClickHouse service (ADR-005,
+`db/clickhouse/014_saved_sites.sql`). Two writers, one table: the agent's `saveSite` tool with
+the task's `default` client, and the Worker's `POST /api/save-site` as `app_writer` (`GRANT
+INSERT, SELECT` on that table and nothing else — a Worker must not hold `default`). The browser
+reads it directly as `site`. Read with `FINAL`; a write is visible to the very next read.
 
-```bash
-export PATH="/opt/homebrew/opt/libpq/bin:$PATH"   # psql isn't on PATH by default
-curl -s -u "$CLICKHOUSE_API_KEY_ID:$CLICKHOUSE_API_KEY_SECRET" \
-  ".../postgres/$PG_ID/caCertificates" -o .secrets/pg-ca.crt   # raw PEM, not JSON
-psql "$POSTGRES_URL&sslmode=verify-full&sslrootcert=.secrets/pg-ca.crt" -c "SELECT 1"
-```
-`.secrets/` is gitignored. ClickPipe `wherehouse-pg-cdc` replicates
-`public.{shortlists,saved_sites}` → `oltp.pg_*` every 10 s.
+There is **no managed Postgres and no ClickPipes CDC any more** — `wherehouse-oltp`, the
+`wherehouse-pg-cdc` pipe, the `oltp` database and the Cloudflare Hyperdrive config + CA upload
+that were the Worker's only route to Postgres were all deleted on 1 August, after the five live
+saved sites were migrated and read back. ADR-004 keeps the record (and the CDC gotchas, which
+are still true of ClickPipes); ADR-005 says what runs now.
 
 **Trigger.dev** — project `trigger-dev-hackathon` (`proj_klnembmmwmnxxishtmvf`), task
 `wherehouse-chat` (`web/src/trigger/chat.ts`). Two environments, two keys, both in `.env`:
@@ -171,13 +171,12 @@ hand:
 
 - **`trigger deploy` imports every task file in a remote build container as part of the
   build** ("indexer" step) — any `process.env.X` read eagerly at module load runs THERE
-  too, not only inside a task run. `web/src/lib/pg.ts` used to build its Postgres `Pool`
-  (and read the CA cert file) unconditionally at import time — meaning *every* chat
-  message, not just `saveSite`, would have crashed the deployed task with no way to supply
-  `.secrets/pg-ca.crt` in a deployed container. Fixed: `pg.ts` now prefers a
-  `POSTGRES_CA_CERT` env var (set by `deploy-trigger.sh env`) over the local file; the file
-  read is the local-dev fallback. Import the env vars *before* deploying — the indexer
-  step reads whatever's already in the prod environment.
+  too, not only inside a task run. The old `web/src/lib/pg.ts` built its Postgres `Pool`
+  (and read the CA cert file) unconditionally at import time — meaning *every* chat message,
+  not just `saveSite`, would have crashed the deployed task with no way to supply
+  `.secrets/pg-ca.crt` in a deployed container. That module is gone (ADR-005), but the rule it
+  taught is not: **no eager env or file reads at module scope.** Import the env vars *before*
+  deploying — the indexer step reads whatever's already in the prod environment.
 - **No CLI subcommand imports env vars or fetches a project's prod secret key** (`trigger
   env` only has `list`/`get`/`pull`). Both go through the REST API
   (`POST /projects/{ref}/envvars/{env}/import`, `GET /projects/{ref}/prod`) — and both
@@ -259,13 +258,17 @@ Read these before writing any geo SQL. Each cost real time today.
   into `web.assets`, via the Cloudflare Worker in `infra/app-worker/`
   (`./infra/deploy-app.sh` rebuilds/redeploys). The Worker also fronts the three
   server-side ops the static export has no runtime for (Trigger token mint + session
-  start, Postgres save/list via **Hyperdrive** — raw Workers TCP sockets can't validate
-  our Postgres's private CA, Hyperdrive can). CORS-open direct-to-ClickHouse queries from
-  the browser (the original proof) are still how the map's own data loads.
+  start, saved-site write). CORS-open direct-to-ClickHouse queries from the browser (the
+  original proof) are still how the map's own data loads.
 - [`docs/architecture/oltp-olap.md`](docs/architecture/oltp-olap.md) —
-  **ADR-004**: ClickHouse-managed Postgres → ClickPipes CDC → ClickHouse. **Built and
-  verified** (~20 s end-to-end). Targets the OLTP+OLAP bonus prize. The point is the
-  join: a user's saved site (seconds old, from Postgres) against 75M Overture POIs.
+  **ADR-004**, *superseded*: ClickHouse-managed Postgres → ClickPipes CDC → ClickHouse. Built,
+  verified (~20 s end-to-end) and shipped for the OLTP+OLAP bonus prize. Read it for the CDC
+  facts; the infrastructure is gone.
+- [`docs/architecture/saved-sites-in-clickhouse.md`](docs/architecture/saved-sites-in-clickhouse.md) —
+  **ADR-005**: saved sites live in ClickHouse (`app.saved_sites`); Postgres, the CDC pipe and
+  Hyperdrive are retired. The join that ADR-004 existed for is unchanged — a site saved seconds
+  ago, re-scored against 75M Overture POIs on H3 equality. Measured: read-after-write visible on
+  the next read, 3/3.
 
 ## Key facts worth not re-deriving
 
@@ -285,14 +288,14 @@ Read these before writing any geo SQL. Each cost real time today.
 
 ## Infrastructure is code — keep it that way
 
-Everything (ClickHouse service, managed Postgres, ClickPipes CDC) was provisioned
-through the **Cloud REST API**, never the console, and lives in `infra/`:
+Everything was provisioned through the **Cloud REST API**, never the console, and lives in
+`infra/` — which is why retiring Postgres + CDC was five documented API calls, not archaeology:
 
 ```sh
-./infra/status.sh                 # read-only: what's running, versions, CDC freshness
+./infra/status.sh                 # read-only: what's running, versions, saved-site count
 ./infra/provision.sh              # rebuild everything from nothing (idempotent)
 ./infra/basemap.sh                # cut city PMTiles → R2 → deploy the tile worker
-./infra/teardown.sh               # destroy billables (run after judging, 29 July)
+./infra/teardown.sh               # destroy billables (--all deletes the ClickHouse service)
 ```
 
 The basemap lives on **Cloudflare**, not ClickHouse: R2 bucket `wherehouse-basemaps` +
@@ -308,9 +311,8 @@ at 2am on 22 July that must be one command, not archaeology.
 The live OpenAPI spec at `https://api.clickhouse.cloud/v1` is ground truth — read it
 instead of guessing field names.
 
-There is a dedicated subagent for this: **`infra-keeper`** (`.claude/agents/`). Use it
-for provisioning, diagnosing CDC/pipe failures, spend checks and teardown; it carries
-the accumulated API gotchas.
+There is a dedicated subagent for this: **`infra-keeper`** (`.claude/agents/`). Use it for
+provisioning, spend checks and teardown; it carries the accumulated API gotchas.
 
 Shell style note: `cmd | python3 - <<'PY'` **steals stdin** and the pipe never arrives.
 Use `cmd | python3 -c "$(cat <<'PY' … PY)"`. This bit us in `status.sh`.
@@ -322,7 +324,7 @@ agent) for the matching task instead of re-deriving:
 
 | Agent (`.claude/agents/`) | Skill (`.claude/skills/`) | For |
 |---|---|---|
-| `infra-keeper` | — | ClickHouse/Postgres/CDC provisioning, pipe failures, spend, teardown — Cloud REST API gotchas |
+| `infra-keeper` | — | ClickHouse service provisioning, spend, teardown — Cloud REST API gotchas |
 | `video-director` | `wherehouse-video` | The demo video: Playwright capture, Remotion compose, Gemini voice+music, ffmpeg mux. Carries every trap (fake-4K capture, audio `asplit`/loudnorm-pumping/sidechain music-cut, Lyria-mpeg, atempo-fit, multi-source timeline, ClickHouse `/play` console, encode CRF). |
 | `project-validator` | `wherehouse-validate`, `wherehouse-categories` | Prove features are real vs the LIVE system (per-tool SQL, headless `chat.agent()` run, no-fakery audit, hard rules); add/remove/audit queryable trades (the Overture-vs-friendly naming trap, "make it shine"). |
 
@@ -335,9 +337,6 @@ agents are the operators that load them.
 - **gitleaks + a tracked-credentials check** — the load-bearing job. The repo goes public
   on 23 July with live keys in a local `.env`; this is the seatbelt. Never weaken it.
 - **shellcheck** on `infra/*.sh` (`--severity=warning`, currently clean)
-- **sql sanity** — applies `db/postgres/001_oltp_schema.sql` to a real `postgres:18-alpine`
-  service container and asserts publication `wherehouse_pub` exists (CDC breaks without it).
-  No credentials needed.
 - **docs links** — relative markdown links must resolve.
 
 Releases are automated by [release-please](https://github.com/googleapis/release-please)

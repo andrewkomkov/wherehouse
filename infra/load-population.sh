@@ -91,9 +91,8 @@ verify() {
     ch "
     SELECT s.label,
            p.population AS people_in_cell
-    FROM oltp.pg_saved_sites AS s
+    FROM app.saved_sites AS s FINAL
     INNER JOIN geo.population AS p ON stringToH3(s.h3_8) = p.h3_8
-    WHERE s._peerdb_is_deleted = 0
     FORMAT PrettyCompactMonoBlock"
 
     echo

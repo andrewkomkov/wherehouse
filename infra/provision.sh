@@ -6,7 +6,7 @@
 # be recreated at 2am on 22 July, that must be one command, not archaeology.
 #
 #   ./infra/provision.sh            # everything
-#   ./infra/provision.sh postgres   # just the OLTP side + CDC
+#   ./infra/provision.sh service    # just the ClickHouse service
 #
 # Prereq: .env with CLICKHOUSE_API_KEY_ID / CLICKHOUSE_API_KEY_SECRET.
 
@@ -14,8 +14,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_env
 
 SERVICE_NAME="trigger-dev-hackathon"
-PG_NAME="wherehouse-oltp"
-PIPE_NAME="wherehouse-pg-cdc"
 REGION="eu-west-1"
 TARGET="${1:-all}"
 
@@ -60,114 +58,32 @@ ok "clickhouse $VER (channel $CHAN)"
 
 [[ "$TARGET" == "service" ]] && exit 0
 
-# ── Managed Postgres (OLTP side, ADR-004) ────────────────────────────────────
+# ── App schema ───────────────────────────────────────────────────────────────
+#
+# `app.saved_sites` — the user's saved sites, in ClickHouse itself (ADR-005). This used to be
+# a managed Postgres instance plus a ClickPipes CDC pipe replicating it back in (ADR-004,
+# retired 2026-08-01); both are gone, and with them the Hyperdrive config the Worker needed
+# to reach Postgres at all. `deploy-app.sh load` applies the same file, so a plain app
+# redeploy also keeps it in step.
+#
+# The file ends in a GRANT — access DDL. NEVER run it while a version upgrade is settling
+# (CLAUDE.md trap #4): confirm `SELECT version()` is stable across a few probes first.
 
-find_pg() {
-    api GET "/organizations/$ORG/postgres" | python3 -c "
-import sys, json
-for p in json.load(sys.stdin)['result']:
-    if p['name'] == '$PG_NAME': print(p['id']); break
-"
-}
+log "applying db/clickhouse/014_saved_sites.sql (app.saved_sites + the site GRANT)"
+apply_sql_file "$ROOT/db/clickhouse/014_saved_sites.sql"
+ok "app.saved_sites ready"
 
-PG_ID="$(find_pg)"
-if [[ -z "$PG_ID" ]]; then
-    log "creating managed Postgres $PG_NAME"
-    RESP="$(api POST "/organizations/$ORG/postgres" "$(python3 -c "
-import json; print(json.dumps({
-  'name': '$PG_NAME', 'provider': 'aws', 'region': '$REGION',
-  'postgresVersion': '18', 'size': 'c6gd.large', 'haType': 'none',
-}))")")"
-    PG_ID="$(jq_r "['result']['id']" <<<"$RESP")"
-    PG_PW="$(jq_r "['result']['password']" <<<"$RESP")"
-    PG_HOST="$(jq_r "['result']['hostname']" <<<"$RESP")"
-    ok "postgres created: $PG_ID"
-    warn "password is returned ONCE — write it to .env now:"
-    echo "    POSTGRES_HOST=$PG_HOST"
-    echo "    POSTGRES_PASSWORD=$PG_PW"
+# The narrow writer the Cloudflare Worker uses for the map-click save. Not in the .sql file
+# because it carries a password: created here from .env, so nothing secret is ever committed.
+# `default` is deliberately NOT reused — an admin credential must not live in a Worker.
+if [[ -n "${CLICKHOUSE_APP_WRITER_PASSWORD:-}" ]]; then
+    log "ensuring ClickHouse user ${CLICKHOUSE_APP_WRITER_USER:-app_writer}"
+    ch "CREATE USER IF NOT EXISTS ${CLICKHOUSE_APP_WRITER_USER:-app_writer} IDENTIFIED WITH sha256_password BY '${CLICKHOUSE_APP_WRITER_PASSWORD}'" >/dev/null
+    ch "GRANT INSERT, SELECT ON app.saved_sites TO ${CLICKHOUSE_APP_WRITER_USER:-app_writer}" >/dev/null
+    ok "app_writer can INSERT/SELECT app.saved_sites and nothing else"
 else
-    ok "postgres exists: $PG_ID"
+    warn "skipping app_writer — CLICKHOUSE_APP_WRITER_PASSWORD unset in .env (the Worker's save endpoint needs it)"
 fi
-
-wait_state "api GET /organizations/$ORG/postgres/$PG_ID" "['result']['state']" running "postgres"
-
-# The server cert is Ubicloud-issued; sslmode=require alone fails verification.
-# This endpoint returns raw PEM, not JSON.
-mkdir -p "$ROOT/.secrets"
-api GET "/organizations/$ORG/postgres/$PG_ID/caCertificates" > "$ROOT/.secrets/pg-ca.crt"
-ok "CA cert -> .secrets/pg-ca.crt"
-
-# ── Schema ───────────────────────────────────────────────────────────────────
-
-PSQL=psql
-command -v psql >/dev/null || PSQL=/opt/homebrew/opt/libpq/bin/psql
-if [[ -x "$PSQL" || -n "$(command -v $PSQL)" ]] && [[ -n "${POSTGRES_PASSWORD:-}" ]]; then
-    PG_URI="postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB:-postgres}?sslmode=verify-full&sslrootcert=$ROOT/.secrets/pg-ca.crt"
-    log "applying OLTP schema"
-    "$PSQL" "$PG_URI" -v ON_ERROR_STOP=1 -q -f "$ROOT/db/postgres/001_oltp_schema.sql"
-    ok "schema applied (publication wherehouse_pub)"
-else
-    warn "skipping schema — psql not found or POSTGRES_PASSWORD unset in .env"
-fi
-
-# ── ClickPipe CDC ────────────────────────────────────────────────────────────
-
-log "ensuring target database oltp"
-curl -s --user "default:${CLICKHOUSE_PASSWORD}" "${CLICKHOUSE_URL}/" \
-     --data-binary "CREATE DATABASE IF NOT EXISTS oltp" >/dev/null
-
-find_pipe() {
-    api GET "/organizations/$ORG/services/$SVC/clickpipes" 2>/dev/null | python3 -c "
-import sys, json
-try: r = json.load(sys.stdin)['result']
-except Exception: r = []
-for p in r:
-    if p['name'] == '$PIPE_NAME': print(p['id']); break
-" 2>/dev/null
-}
-
-PIPE="$(find_pipe)"
-if [[ -z "$PIPE" ]]; then
-    log "creating ClickPipe $PIPE_NAME (postgres CDC)"
-    BODY="$(python3 - <<PY
-import json
-ca = open("$ROOT/.secrets/pg-ca.crt").read()
-print(json.dumps({
- "name": "$PIPE_NAME",
- "source": {"postgres": {
-   "type": "postgres",
-   "host": "${POSTGRES_HOST}", "port": 5432, "database": "${POSTGRES_DB:-postgres}",
-   "authentication": "basic",
-   "credentials": {"username": "${POSTGRES_USER:-postgres}", "password": "${POSTGRES_PASSWORD}"},
-   "caCertificate": ca,
-   # allowNullableColumns: true so a Postgres NULL (e.g. saved_sites.score before it's
-   # scored) lands as ClickHouse NULL, not 0 — "absent != 0" is a hard project invariant.
-   # Found 2026-07-18: the pipe that was actually running had this false (the API default),
-   # so its `score` column collapsed NULL -> 0.0. It is NOT PATCH-able on a running pipe —
-   # PATCH /clickpipes/{id} with a changed allowNullableColumns echoes back the OLD value
-   # unchanged (verified live; same "accepted but ignored" shape as Postgres PATCH `size`).
-   # Fixing the *live* pipe for real means recreating it; harmless today only because the
-   # app's one save path (web/src/components/chat.tsx savePick) always sends a real
-   # numeric score, never null. See db/clickhouse/010_oltp_grants.sql for the full note.
-   "settings": {"replicationMode": "cdc", "publicationName": "wherehouse_pub",
-                "syncIntervalSeconds": 10, "allowNullableColumns": true},
-   "tableMappings": [
-     {"sourceSchemaName": "public", "sourceTable": "shortlists",
-      "targetTable": "pg_shortlists", "tableEngine": "ReplacingMergeTree"},
-     {"sourceSchemaName": "public", "sourceTable": "saved_sites",
-      "targetTable": "pg_saved_sites", "tableEngine": "ReplacingMergeTree"},
-   ]}},
- "destination": {"database": "oltp"},
-}))
-PY
-)"
-    PIPE="$(api POST "/organizations/$ORG/services/$SVC/clickpipes" "$BODY" | jq_r "['result']['id']")"
-    ok "pipe created: $PIPE"
-else
-    ok "pipe exists: $PIPE"
-fi
-
-wait_state "api GET /organizations/$ORG/services/$SVC/clickpipes/$PIPE" "['result']['state']" Running "clickpipe"
 
 echo
 ok "provisioned. run ./infra/status.sh to inspect, ./infra/teardown.sh to destroy."

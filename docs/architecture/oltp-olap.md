@@ -1,7 +1,18 @@
 # ADR-004: Postgres (OLTP) → CDC → ClickHouse (OLAP)
 
-**Status:** ACCEPTED — built and verified end-to-end, 2026-07-17
+**Status:** SUPERSEDED by [ADR-005](saved-sites-in-clickhouse.md), 2026-08-01 — built,
+verified end-to-end and shipped 2026-07-17; the Postgres instance and the CDC pipe were
+deleted once the hackathon closed.
 **Date:** 2026-07-17
+
+> **This describes what we ran during the hackathon, not what runs now.** The reasoning below
+> stands on its own — it is why the OLTP+OLAP split was the right call *for a workspace with a
+> bonus prize attached to it*. What changed afterwards is the cost side, not the argument:
+> five saved rows did not justify a Postgres instance, a CDC pipe and a Cloudflare Hyperdrive
+> config (the only way a Worker could validate that server's private CA). ADR-005 moves the
+> saved sites into ClickHouse itself and keeps the join that this ADR exists for. Read this one
+> for the CDC facts (they were all verified live, and are still true of ClickPipes); read
+> ADR-005 for what the code does today.
 
 ## Why
 
@@ -33,7 +44,8 @@ ClickHouse Cloud 26.4 → oltp.pg_shortlists / oltp.pg_saved_sites (ReplacingMer
 - **ClickPipe** `wherehouse-pg-cdc`, `replicationMode: cdc`, `publicationName: wherehouse_pub`,
   targets `ReplacingMergeTree`. Created via
   `POST /v1/organizations/{org}/services/{svc}/clickpipes`.
-- Schema: [`db/postgres/001_oltp_schema.sql`](../../db/postgres/001_oltp_schema.sql).
+- Schema: `db/postgres/001_oltp_schema.sql` — deleted with the instance; see `git log` if the
+  DDL is ever needed again.
 
 ## Verified facts
 
@@ -131,9 +143,15 @@ answer rather than a checkbox, and it follows from the product rather than the r
 Running cost: one `c6gd.large` Postgres + one ClickPipe for ~6 days, against $400 of
 credits. Comfortable.
 
-## Cleanup after judging (29 July)
+## Cleanup (done, 2026-08-01)
+
+The five live saved sites were copied into `app.saved_sites` (ADR-005) and read back before
+anything was deleted; then, in this order:
 
 ```bash
-DELETE /v1/organizations/{org}/services/{svc}/clickpipes/{pipeId}
+DELETE /v1/organizations/{org}/services/{svc}/clickpipes/{pipeId}   # pipe first — it holds the slot
 DELETE /v1/organizations/{org}/postgres/{postgresId}
+wrangler hyperdrive delete wherehouse-pg-hyperdrive                 # Worker's only route to it
+wrangler cert delete --id <wherehouse-pg-ca>
+DROP DATABASE oltp                                                  # the CDC target + PeerDB raw table
 ```

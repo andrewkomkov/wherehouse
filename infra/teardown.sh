@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
-# Destroy the billable infrastructure. Run AFTER judging closes (29 July 2026).
+# Destroy the billable infrastructure.
 #
-# Deliberately does NOT touch the ClickHouse service by default — that one holds the
-# demo data and the judges may still be looking at it. Postgres + the CDC pipe are the
-# things quietly burning credits.
+# There is one billable thing left: the ClickHouse service. It is not touched without
+# `--all`, because it holds every byte the product has — Overture-derived `geo.places`,
+# Kontur population, the isochrones, the static bundle in `web.assets` and the user's saved
+# sites. Deleting it means re-running the loaders, not just re-running provision.sh.
 #
-#   ./infra/teardown.sh              # postgres + clickpipe
-#   ./infra/teardown.sh --all        # ...and the ClickHouse service itself
+# The managed Postgres (`wherehouse-oltp`) and the ClickPipe (`wherehouse-pg-cdc`) this
+# script used to delete were removed for good on 2026-08-01 (ADR-005) — saved sites live in
+# ClickHouse now, so there is no second store to tear down. Same for the Cloudflare
+# Hyperdrive config and its uploaded CA cert, which existed only to reach that Postgres.
+#
+#   ./infra/teardown.sh              # report what is billable, delete nothing
+#   ./infra/teardown.sh --all        # delete the ClickHouse service itself
+#
+# Not covered here (different provider, wrangler OAuth is not a .env credential): the R2
+# bucket and the two Cloudflare Workers. `wrangler r2 bucket delete wherehouse-basemaps` and
+# `wrangler delete` in infra/app-worker/ + infra/basemap-worker/ if those go too.
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_env
 
-PG_NAME="wherehouse-oltp"
-PIPE_NAME="wherehouse-pg-cdc"
 ALL="${1:-}"
 
 ORG="$(api GET /organizations | jq_r "['result'][0]['id']")"
@@ -22,53 +30,31 @@ confirm() {
     read -r a; [[ "$a" == "y" || "$a" == "Y" ]]
 }
 
-# ── ClickPipe ────────────────────────────────────────────────────────────────
-
-SVC="$(api GET "/organizations/$ORG/services" | jq_r "['result'][0]['id']")"
-PIPE="$(api GET "/organizations/$ORG/services/$SVC/clickpipes" 2>/dev/null | python3 -c "
-import sys, json
-try: r = json.load(sys.stdin)['result']
-except Exception: r = []
-for p in r:
-    if p['name'] == '$PIPE_NAME': print(p['id']); break
-" 2>/dev/null)"
-
-if [[ -n "$PIPE" ]]; then
-    if confirm "delete ClickPipe $PIPE_NAME ($PIPE)?"; then
-        api DELETE "/organizations/$ORG/services/$SVC/clickpipes/$PIPE" >/dev/null
-        ok "clickpipe deleted"
-    fi
-else
-    log "no clickpipe named $PIPE_NAME"
-fi
-
-# ── Postgres ─────────────────────────────────────────────────────────────────
-
-PG_ID="$(api GET "/organizations/$ORG/postgres" | python3 -c "
-import sys, json
-for p in json.load(sys.stdin)['result']:
-    if p['name'] == '$PG_NAME': print(p['id']); break
-")"
-
-if [[ -n "$PG_ID" ]]; then
-    if confirm "delete managed Postgres $PG_NAME ($PG_ID)? THIS DESTROYS THE OLTP DATA."; then
-        api DELETE "/organizations/$ORG/postgres/$PG_ID" >/dev/null
-        ok "postgres deleted"
-    fi
-else
-    log "no postgres named $PG_NAME"
-fi
-
 # ── ClickHouse service ───────────────────────────────────────────────────────
 
-if [[ "$ALL" == "--all" ]]; then
-    warn "the ClickHouse service holds the demo data judges may still be reviewing"
-    if confirm "REALLY delete the ClickHouse service $SVC?"; then
-        api PATCH "/organizations/$ORG/services/$SVC/state" '{"command":"stop"}' >/dev/null || true
-        wait_state "api GET /organizations/$ORG/services/$SVC" "['result']['state']" stopped "service"
-        api DELETE "/organizations/$ORG/services/$SVC" >/dev/null
-        ok "service deleted"
-    fi
+SVC="$(api GET "/organizations/$ORG/services" | jq_r "['result'][0]['id']")"
+[[ -n "$SVC" ]] || die "no ClickHouse service visible — nothing to tear down"
+
+api GET "/organizations/$ORG/services/$SVC" | python3 -c "$(cat <<'PY'
+import sys, json
+s = json.load(sys.stdin)["result"]
+print(f'  {s["name"]}  {s["state"]}  v{s["clickhouseVersion"]}  '
+      f'mem={s.get("minTotalMemoryGb")}-{s.get("maxTotalMemoryGb")}GB  '
+      f'idle={s.get("idleScaling")}/{s.get("idleTimeoutMinutes")}min')
+PY
+)"
+
+if [[ "$ALL" != "--all" ]]; then
+    log "nothing deleted. Pass --all to delete the ClickHouse service above."
+    exit 0
+fi
+
+warn "the service holds ALL the data — places, population, isochrones, web.assets, saved sites"
+if confirm "REALLY delete the ClickHouse service $SVC?"; then
+    api PATCH "/organizations/$ORG/services/$SVC/state" '{"command":"stop"}' >/dev/null || true
+    wait_state "api GET /organizations/$ORG/services/$SVC" "['result']['state']" stopped "service"
+    api DELETE "/organizations/$ORG/services/$SVC" >/dev/null
+    ok "service deleted"
 fi
 
 echo; ok "teardown done. ./infra/status.sh to confirm."

@@ -78,8 +78,9 @@ Corollary: no beautiful component may be built on top of an unproven integration
 
 ### IV. Infrastructure is reproducible code
 
-Every cloud resource — ClickHouse service, managed Postgres, ClickPipes CDC — is created
-through the REST API and lives in `infra/`, idempotent. **A console click is a bug**: it
+Every cloud resource is created through the REST API and lives in `infra/`, idempotent —
+that covered the managed Postgres and the CDC pipe while they existed, and it is why deleting
+them was five documented API calls rather than archaeology. **A console click is a bug**: it
 evaporates the moment the service is recreated, and the deadline is server-enforced.
 
 If you change infrastructure, `infra/` changes in the same commit. The live OpenAPI spec
@@ -88,8 +89,8 @@ If you change infrastructure, `infra/` changes in the same commit. The live Open
 ### V. Secrets never enter git
 
 The repo is private now and **must be public under MIT by 23 July 12:00 UTC** — with live
-ClickHouse, Trigger.dev and Postgres credentials sitting in a local `.env`. A leaked
-credential in git history is not fixable by deleting a file.
+ClickHouse and Trigger.dev credentials sitting in a local `.env`. A leaked credential in git
+history is not fixable by deleting a file.
 
 `.env`, `.secrets/`, and credential drops are gitignored; CI gates on gitleaks plus a
 tracked-credentials check. **This gate is never weakened, skipped, or worked around.**
@@ -131,7 +132,8 @@ hour?* If yes, an agent does it from a script that survives.
 ## Technical Constraints
 
 - **ClickHouse is the primary database.** Not a cache, not a sidecar — a rules requirement.
-  Postgres exists only as the OLTP/CDC side of ADR-004.
+  Since ADR-005 it is also the *only* database: the managed Postgres and the ClickPipes CDC
+  pipe of ADR-004 were retired once the hackathon closed.
 - **Trigger.dev `chat.agent()` is mandatory** per the rules; superficial use is
   disqualifying.
 - **Cloud runs 26.4** (`fast` channel) and trails open-source ~2 releases. `GeoJSON`
@@ -179,7 +181,13 @@ Reviews verify compliance. Complexity must be justified against Principle VI.
 Runtime guidance for agents lives in `CLAUDE.md`; where `CLAUDE.md` and this constitution
 disagree, this file wins and `CLAUDE.md` gets fixed.
 
-**Version**: 1.2.1 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-21
+**Version**: 1.2.2 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-08-01
+
+*1.2.2 — Factual refresh, no principle changed: the managed Postgres and ClickPipes CDC pipe
+named in the Technical Constraints, Principle IV and Principle V were retired with ADR-005, so
+the text no longer describes infrastructure that exists. Principle II's `PATCH /postgres {size}`
+example is deliberately KEPT — it is a record of how a state field lied, and that lesson does
+not expire with the instance.*
 
 *1.2.1 — Added a freshness note to Principle II's day-3 example: composite demand re-ranked the
 surface, so the illustrative "Lichtenrade, Biesdorf, Mahlsdorf" top-3 no longer reproduces. The

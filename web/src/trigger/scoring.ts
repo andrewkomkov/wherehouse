@@ -562,11 +562,13 @@ export function bboxSql(city: CityName, categories: string[]): string {
 }
 
 /**
- * The saved-site join — this feature's whole point (ADR-004, the OLTP+OLAP story).
+ * The saved-site join — a user's own state re-scored against today's market.
  *
- * A user's saved sites (seconds old, replicated from managed Postgres by ClickPipes CDC into
- * `oltp.pg_saved_sites`) re-scored against *today's* market: the same `scored` CTE the choropleth
- * and ranking read, joined on `stringToH3(ss.h3_8) = sc.cell` — H3 equality, no interpolation.
+ * The sites live in `app.saved_sites`, written by the same two save paths that read them back
+ * (ADR-005). They used to arrive by CDC from managed Postgres (`oltp.pg_saved_sites` JOIN
+ * `oltp.pg_shortlists`, ADR-004, retired 2026-08-01); the join to the market is unchanged and is
+ * still the point: the same `scored` CTE the choropleth and ranking read, joined on
+ * `stringToH3(ss.h3_8) = sc.cell` — H3 equality, no interpolation.
  *
  * The join to `scored` is **LEFT**: a saved site whose h3 sits outside the scored set (e.g. the
  * user pinned a spot past the city bbox) survives with a NULL score and renders "unscored", never
@@ -574,18 +576,16 @@ export function bboxSql(city: CityName, categories: string[]): string {
  * is the guard: a LEFT JOIN miss leaves `sc.cell` at the H3 zero value, so `market_gap`/`residents`/
  * `rivals` are omitted entirely rather than emitted as 0.
  *
- * `oltp.pg_shortlists` scopes the sites to the requested city AND `business_type` (a user's
- * shortlist carries both; saved sites carry neither of their own). The `business_type` filter is
- * load-bearing, not cosmetic: without it a saved *pharmacy* would be returned and re-scored on the
- * *bakery* GAP surface, then drawn and counted as a saved bakery site — a wrong-trade answer. Both
- * `_peerdb_is_deleted = 0` filters are mandatory — CDC keeps tombstones, and without them a deleted
- * site or shortlist reappears.
+ * The `business_type` filter is load-bearing, not cosmetic: without it a saved *pharmacy* would be
+ * returned and re-scored on the *bakery* GAP surface, then drawn and counted as a saved bakery
+ * site — a wrong-trade answer. It is a plain column now (it used to hang off the shortlist row),
+ * so the second JOIN and both `_peerdb_is_deleted = 0` tombstone filters are gone with it.
  *
- * `businessType` is the user-facing trade word the shortlist was saved under (e.g. 'bakery', or a
+ * `businessType` is the user-facing trade word the site was saved under (e.g. 'bakery', or a
  * group like 'food and drink') — the SAME string both save paths persist (saveSite in chat.ts and
  * the Worker's handleSaveSite), so it matches on equality. It is deliberately NOT the resolved
  * `categories` array: that array is the Overture taxonomy the GAP surface is scored on, whereas the
- * shortlist stores the word the user typed.
+ * saved row stores the word the user typed.
  *
  * Measured, u1 / berlin / bakery, 2026-07-17: 'Kastanienallee corner' gap 0.0 (3,725 residents,
  * 25 rivals), 'Boxhagener Platz' 18.2 (1,772, 10) — both saturated central sites.
@@ -618,15 +618,12 @@ export function savedSitesGeoJsonSql(
         ',"rivals":', toString(sc.sup)), ''),
       '}}')), ','),
     ']}')
-  -- FINAL on both CDC tables: they are SharedReplacingMergeTree keyed on _peerdb_version, so an
-  -- edited or deleted site can sit as two versions until a background merge. Without FINAL the
-  -- older (un-deleted) version can win and a just-deleted site reappears — exactly the freshness
-  -- CDC exists to give us. FINAL collapses to the latest version per row before the filter runs.
-  FROM oltp.pg_saved_sites AS ss FINAL
-  INNER JOIN oltp.pg_shortlists AS sl FINAL
-    ON ss.shortlist_id = sl.id AND sl.city = '${c}' AND sl.business_type = '${bt}'
+  -- FINAL: the table is a ReplacingMergeTree, so an edited site can sit as two versions until a
+  -- background merge and the older one could win. FINAL collapses to the latest updated_at per
+  -- row before the filter runs.
+  FROM app.saved_sites AS ss FINAL
   LEFT JOIN scored sc ON stringToH3(ss.h3_8) = sc.cell
-  WHERE ss._peerdb_is_deleted = 0 AND sl._peerdb_is_deleted = 0 AND ss.user_id = '${uid}'`;
+  WHERE ss.user_id = '${uid}' AND ss.city = '${c}' AND ss.business_type = '${bt}'`;
 }
 
 /**
@@ -634,9 +631,9 @@ export function savedSitesGeoJsonSql(
  * geometry (ADR-001). `market_gap`/`residents`/`rivals` come back NULL for a site outside the
  * scored set (LEFT JOIN miss); the caller renders that as "unscored", never 0 (FR-006).
  *
- * Scoped to the shortlist's `business_type` too — see savedSitesGeoJsonSql for why (a saved
- * pharmacy must not be re-scored and summarised as a saved bakery). `businessType` is the trade
- * word the shortlist was saved under, matched on equality.
+ * Scoped to `business_type` too — see savedSitesGeoJsonSql for why (a saved pharmacy must not be
+ * re-scored and summarised as a saved bakery). `businessType` is the trade word the site was saved
+ * under, matched on equality.
  *
  * Measured, u1 / berlin / bakery, 2026-07-17: two rows, market_gap 0.0 and 5.4. (The 5.4 was
  * 18.2 while the score was two-term; feature 002 folded accessibility into the same candidateCells
@@ -661,13 +658,11 @@ export function savedSitesRowsSql(
          sc.sup              AS rivals,
          ss.status           AS status,
          ss.created_at       AS created_at
-  -- FINAL: see savedSitesGeoJsonSql — collapse SharedReplacingMergeTree versions before filtering
-  -- so a just-deleted or just-edited site is read at its latest version, not a stale one.
-  FROM oltp.pg_saved_sites AS ss FINAL
-  INNER JOIN oltp.pg_shortlists AS sl FINAL
-    ON ss.shortlist_id = sl.id AND sl.city = '${c}' AND sl.business_type = '${bt}'
+  -- FINAL: see savedSitesGeoJsonSql — collapse ReplacingMergeTree versions before filtering so a
+  -- just-edited site is read at its latest version, not a stale one.
+  FROM app.saved_sites AS ss FINAL
   LEFT JOIN scored sc ON stringToH3(ss.h3_8) = sc.cell
-  WHERE ss._peerdb_is_deleted = 0 AND sl._peerdb_is_deleted = 0 AND ss.user_id = '${uid}'
+  WHERE ss.user_id = '${uid}' AND ss.city = '${c}' AND ss.business_type = '${bt}'
   ORDER BY ss.created_at`;
 }
 

@@ -5,19 +5,20 @@
  *
  * The app now ships as a static export (`output: "export"` — zero server runtime, no
  * Server Actions, no API routes) so it can be served as bytes straight out of ClickHouse.
- * The three operations that used to be Next.js Server Actions — mint a Trigger public
- * token, start a chat session, save/list a site in Postgres — moved to the Cloudflare
- * Worker that fronts the ClickHouse-served bundle (`infra/app-worker/`). This module keeps
- * the exact same function signatures the old `actions.ts` exposed, so `chat.tsx` only needed
- * an import swap.
+ * The operations that used to be Next.js Server Actions — mint a Trigger public token, start a
+ * chat session, save a site — moved to the Cloudflare Worker that fronts the ClickHouse-served
+ * bundle (`infra/app-worker/`). This module keeps the exact same function signatures the old
+ * `actions.ts` exposed, so `chat.tsx` only needed an import swap.
+ *
+ * Reads are not here: the saved-list read goes browser-direct to ClickHouse
+ * (`chat.tsx::fetchSavedSitesFromClickHouse`). Only the write needs the Worker, because it needs
+ * a credential that can INSERT (ADR-005).
  *
  * `NEXT_PUBLIC_API_BASE_URL` points at the ONE deployed Worker in both `next dev` and
  * production — there is no local mock/proxy. That mirrors how `NEXT_PUBLIC_CLICKHOUSE_URL`
  * is already hit directly from the browser in dev (ADR-003's browser-direct-to-Cloud
  * pattern); it means dev and prod exercise the identical code path, not a simulation of it.
  */
-
-import type { SavedSiteRow } from "./types";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
 
@@ -58,8 +59,8 @@ export async function startChatSession(input: {
   return res.json();
 }
 
-/** Click-to-save. Returns the new saved_site id, or the error string on failure — same
- * contract as the old server action. */
+/** Click-to-save. Returns the new `app.saved_sites` id (a UUID), or the error string on failure
+ * — same contract as the old server action. */
 export async function saveSiteAction(input: {
   chatId: string;
   city: string;
@@ -69,7 +70,7 @@ export async function saveSiteAction(input: {
   lat: number;
   h3_8: string;
   score?: number | null;
-}): Promise<{ ok: true; id: number } | { ok: false; error: string }> {
+}): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   try {
     const res = await fetch(apiUrl("/api/save-site"), {
       method: "POST",
@@ -77,7 +78,7 @@ export async function saveSiteAction(input: {
       body: JSON.stringify(input),
     });
     const json = (await res.json().catch(() => ({}))) as
-      | { ok: true; id: number }
+      | { ok: true; id: string }
       | { ok: false; error?: string };
     if (!res.ok || !json.ok) {
       return { ok: false, error: ("error" in json && json.error) || `HTTP ${res.status}` };
@@ -86,17 +87,4 @@ export async function saveSiteAction(input: {
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-}
-
-/** The panel's initial render. Postgres (via the Worker's Hyperdrive binding) is
- * authoritative, so the newest save is visible with no CDC wait. */
-export async function listSavedSitesAction(city?: string): Promise<SavedSiteRow[]> {
-  const url = new URL(apiUrl("/api/list-saved"), API_BASE || "http://localhost");
-  if (city) url.searchParams.set("city", city);
-  // When API_BASE is empty (misconfigured) the dummy base above would leak into the request;
-  // guard by always using an absolute API_BASE in practice (set in .env / wrangler vars).
-  const href = API_BASE ? url.toString() : `/api/list-saved${city ? `?city=${encodeURIComponent(city)}` : ""}`;
-  const res = await fetch(href);
-  if (!res.ok) return [];
-  return res.json();
 }
