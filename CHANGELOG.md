@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0](https://github.com/andrewkomkov/wherehouse/compare/v0.2.0...v1.0.0) (2026-08-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* POSTGRES_URL/HOST/USER/PASSWORD/DB are replaced by CLICKHOUSE_APP_WRITER_USER/PASSWORD; .secrets/pg-ca.crt is no longer used; deploy-app.sh loses its provision subcommand; SavedSiteRow.id is a UUID string and shortlist_id is gone.
+
+### Bug Fixes
+
+* **trigger:** run tasks on node-22 so refresh-population can load node:sqlite ([81bc50c](https://github.com/andrewkomkov/wherehouse/commit/81bc50cc31d55ffff4a0ab213917c4f127d4ef6b))
+
+
+### Refactoring
+
+* move saved sites into clickhouse and retire postgres + cdc ([0a1db05](https://github.com/andrewkomkov/wherehouse/commit/0a1db05ac95407bb7b93de712c8a353cba31d4ad))
+
 ## [0.2.0](https://github.com/andrewkomkov/wherehouse/compare/v0.1.0...v0.2.0) (2026-07-21)
 
 
