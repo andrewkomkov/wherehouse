@@ -2,26 +2,25 @@
 # ADR-003 "for real": build the app as a static export, load it into ClickHouse
 # (`web.assets`, one row per file), and deploy the Cloudflare Worker that serves those
 # bytes to the browser and fronts the three server-side operations (Trigger.dev public
-# token, chat-session start, Postgres save/list) that used to be Next.js Server Actions.
+# token, chat-session start, saved-site write) that used to be Next.js Server Actions.
 #
-# Idempotent: re-running rebuilds, re-truncates+reloads web.assets, re-provisions the
-# Cloudflare CA cert / Hyperdrive config only if missing (by name), and redeploys the
-# Worker. Auth: wrangler OAuth (`wrangler login`) for Cloudflare, `.env` for ClickHouse.
+# Idempotent: re-running rebuilds, re-truncates+reloads web.assets, and redeploys the
+# Worker with its secrets. Auth: wrangler OAuth (`wrangler login`) for Cloudflare, `.env`
+# for ClickHouse.
 #
-#   ./infra/deploy-app.sh              # everything: build -> load -> provision -> deploy -> verify
+#   ./infra/deploy-app.sh              # everything: build -> load -> deploy -> verify
 #   ./infra/deploy-app.sh build        # just the static export
 #   ./infra/deploy-app.sh load         # just (re)load web/out/ into ClickHouse
-#   ./infra/deploy-app.sh provision    # just the CA cert + Hyperdrive config (idempotent)
 #   ./infra/deploy-app.sh deploy       # just `wrangler deploy` (+ secrets)
-#   ./infra/deploy-app.sh verify       # live GET against the custom domain + a chat smoke test
+#   ./infra/deploy-app.sh verify       # live GET + token mint + a real round-trip save
 #
-# ── Why a Cloudflare Worker is in front at all, and why Postgres needs Hyperdrive ──
+# ── Why a Cloudflare Worker is in front at all ──
 #
 # The static export has NO server runtime (no Server Actions, no API routes) — that's the
 # whole point of shipping it as ClickHouse rows. Three operations still need a secret
-# server-side: minting a Trigger.dev public token, starting a chat session, and
-# reading/writing the OLTP saved-site history. All three were proven to work from workerd
-# BEFORE this script was written (constitution III):
+# server-side: minting a Trigger.dev public token, starting a chat session, and writing a
+# saved site. All three were proven to work from workerd BEFORE this script was written
+# (constitution III):
 #
 #   - Token mint + session start: `@trigger.dev/sdk`'s `auth.createPublicToken` and
 #     `@trigger.dev/sdk/ai`'s `chat.createStartSessionAction` are pure `fetch` + local
@@ -29,22 +28,16 @@
 #     minted a real token and started a real chat.agent session/run against the live
 #     Trigger.dev API (session/run ids confirmed, then cancelled for cleanliness).
 #
-#   - Postgres: raw `cloudflare:sockets` (`pg`'s own `pg-cloudflare` support) completes the
-#     TCP + Postgres SSLRequest handshake fine, but the TLS upgrade (`startTls()`) closes
-#     itself asynchronously ~1s later — Cloudflare's Sockets API validates only against
-#     public root CAs, with no custom-CA option, and our managed Postgres presents a
-#     private Ubicloud-issued CA (same root cause as the documented `psql sslmode=require`
-#     failure). Hyperdrive DOES support a custom CA (`--ca-certificate-id`) and this was
-#     verified end-to-end on a real deployed Worker: 4/4 requests returned real
-#     `saved_sites` rows. This script automates exactly that provisioning.
+#   - Saved-site write: one HTTPS POST to ClickHouse as the narrow `app_writer` user
+#     (INSERT/SELECT on `app.saved_sites` and nothing else). `verify` below proves it end
+#     to end on every deploy with a canary row it then deletes.
 #
-#   - The CA bundle at .secrets/pg-ca.crt holds TWO root certs (an old/new pair, both
-#     currently valid) — only ONE actually signs the live Postgres leaf cert. Uploading
-#     the wrong one (or both concatenated) makes Hyperdrive fail with
-#     "certificate signature failure [BAD_SIGNATURE]" at config-creation time, which reads
-#     like a bad CA when it's actually the wrong (but real, valid) root. This script picks
-#     the right one the same way that was diagnosed: `openssl verify` each candidate
-#     against the live leaf cert fetched via `openssl s_client -starttls postgres`.
+# This script used to also provision a Cloudflare CA-certificate upload and a Hyperdrive
+# config, because saved sites lived in a managed Postgres whose private Ubicloud CA raw
+# `cloudflare:sockets` could not validate (ADR-004). ADR-005 moved that state into
+# ClickHouse, which the Worker reaches over ordinary public-CA HTTPS — so the `provision`
+# subcommand, the two-roots-in-the-bundle diagnosis it automated, and the Hyperdrive
+# binding are all gone. `git log` has them if that path is ever needed again.
 
 set -euo pipefail
 
@@ -55,19 +48,13 @@ load_env
 
 : "${CLICKHOUSE_URL:?missing in .env}"
 : "${CLICKHOUSE_PASSWORD:?missing in .env}"
-: "${POSTGRES_HOST:?missing in .env}"
-: "${POSTGRES_USER:?missing in .env}"
-: "${POSTGRES_PASSWORD:?missing in .env}"
-: "${POSTGRES_DB:?missing in .env}"
+: "${CLICKHOUSE_APP_WRITER_PASSWORD:?missing in .env — the app_writer password (ADR-005)}"
 : "${TRIGGER_SECRET_KEY_PROD:?missing in .env — run ./infra/deploy-trigger.sh key first}"
 
 WEB_DIR="$ROOT/web"
 WORKER_DIR="$ROOT/infra/app-worker"
-CA_CERT_NAME="wherehouse-pg-ca"
-HYPERDRIVE_NAME="wherehouse-pg-hyperdrive"
 WORKER_NAME="wherehouse-app"
 HOSTNAME_PUBLIC="app.slim-shaggy.com"
-CA_CACHE="${TMPDIR:-/tmp}/wherehouse-pg-ca-correct.pem"
 
 need() { command -v "$1" >/dev/null 2>&1 || die "missing '$1' — $2"; }
 
@@ -75,7 +62,6 @@ preflight() {
     need pnpm "corepack enable, or npm i -g pnpm"
     need wrangler "pnpm add -g wrangler"
     need python3 "should be on macOS/Linux by default"
-    need openssl "should be on macOS/Linux by default"
     wrangler whoami >/dev/null 2>&1 || die "wrangler not authenticated — run 'wrangler login'"
 }
 
@@ -93,6 +79,13 @@ do_build() {
 do_load() {
     log "ensuring web.assets exists"
     apply_sql_file "$ROOT/db/clickhouse/009_app_assets_schema.sql"
+
+    # The saved-site store the Worker writes and the browser reads (ADR-005). Idempotent
+    # (CREATE ... IF NOT EXISTS + a GRANT), so it costs nothing to keep it in step with the
+    # bundle it serves. NB the GRANT is access DDL — never run this mid-version-upgrade
+    # (CLAUDE.md trap #4).
+    log "ensuring app.saved_sites exists"
+    apply_sql_file "$ROOT/db/clickhouse/014_saved_sites.sql"
 
     [[ -d "$WEB_DIR/out" ]] || die "no web/out — run './infra/deploy-app.sh build' first"
 
@@ -184,111 +177,6 @@ PY
     ok "loaded $count files into web.assets"
 }
 
-# --- provision Cloudflare (idempotent by name) ----------------------------------------
-
-# The CA bundle has two roots (old/new); only one signs the live leaf. Pick it the same
-# way the mismatch was originally diagnosed.
-resolve_correct_ca() {
-    local bundle="$ROOT/.secrets/pg-ca.crt"
-    [[ -f "$bundle" ]] || die "no .secrets/pg-ca.crt — fetch it per CLAUDE.md's Postgres section first"
-
-    local tmpdir leaf i
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
-
-    awk -v d="$tmpdir" 'BEGIN{c=0} /BEGIN CERTIFICATE/{c++} {print > (d "/cand" c ".pem")}' "$bundle"
-
-    leaf="$tmpdir/leaf.pem"
-    echo | openssl s_client -connect "$POSTGRES_HOST:5432" -starttls postgres -showcerts 2>/dev/null \
-        | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' | head -20 > "$leaf"
-    [[ -s "$leaf" ]] || die "could not fetch the live Postgres leaf cert via openssl s_client"
-
-    for i in "$tmpdir"/cand*.pem; do
-        if openssl verify -CAfile "$i" "$leaf" >/dev/null 2>&1; then
-            cp "$i" "$CA_CACHE"
-            return 0
-        fi
-    done
-    die "none of the CA bundle's certs verify the live Postgres leaf — CA may have rotated; re-fetch .secrets/pg-ca.crt"
-}
-
-cert_id_by_name() {
-    wrangler cert list 2>/dev/null | python3 -c "$(cat <<'PY'
-import sys
-name = sys.argv[1]
-lines = sys.stdin.read().splitlines()
-cur_id = None
-for line in lines:
-    line = line.strip()
-    if line.startswith("ID:"):
-        cur_id = line.split("ID:", 1)[1].strip()
-    elif line.startswith("Name:") and line.split("Name:", 1)[1].strip() == name:
-        print(cur_id or "")
-        break
-PY
-)" "$1"
-}
-
-hyperdrive_id_by_name() {
-    wrangler hyperdrive list 2>/dev/null | python3 -c "$(cat <<'PY'
-import sys
-name = sys.argv[1]
-for line in sys.stdin.read().splitlines():
-    if "│" not in line:
-        continue
-    cols = [c.strip() for c in line.split("│")]
-    if len(cols) > 2 and cols[2] == name:
-        print(cols[1])
-        break
-PY
-)" "$1"
-}
-
-do_provision() {
-    local ca_id hd_id
-
-    ca_id="$(cert_id_by_name "$CA_CERT_NAME")"
-    if [[ -z "$ca_id" ]]; then
-        log "CA cert '$CA_CERT_NAME' not found — resolving the correct root and uploading"
-        resolve_correct_ca
-        ca_id="$(wrangler cert upload certificate-authority --ca-cert "$CA_CACHE" --name "$CA_CERT_NAME" 2>&1 \
-            | grep -o 'ID: [a-f0-9-]*' | head -1 | cut -d' ' -f2)"
-        [[ -n "$ca_id" ]] || die "CA cert upload did not report an ID"
-        ok "uploaded CA cert '$CA_CERT_NAME': $ca_id"
-    else
-        ok "CA cert '$CA_CERT_NAME' already exists: $ca_id"
-    fi
-
-    hd_id="$(hyperdrive_id_by_name "$HYPERDRIVE_NAME")"
-    if [[ -z "$hd_id" ]]; then
-        log "Hyperdrive config '$HYPERDRIVE_NAME' not found — creating"
-        hd_id="$(wrangler hyperdrive create "$HYPERDRIVE_NAME" \
-            --origin-host "$POSTGRES_HOST" --origin-port 5432 \
-            --database "$POSTGRES_DB" --origin-user "$POSTGRES_USER" --origin-password "$POSTGRES_PASSWORD" \
-            --origin-scheme postgres \
-            --ca-certificate-id "$ca_id" \
-            --sslmode verify-full 2>&1 | tee /dev/stderr | grep -o '"id": "[a-f0-9]*"' | head -1 | cut -d'"' -f4)"
-        [[ -n "$hd_id" ]] || die "Hyperdrive creation did not report an ID"
-        ok "created Hyperdrive config '$HYPERDRIVE_NAME': $hd_id"
-    else
-        ok "Hyperdrive config '$HYPERDRIVE_NAME' already exists: $hd_id"
-    fi
-
-    # Keep wrangler.toml's binding id in sync (idempotent rewrite).
-    python3 -c "$(cat <<'PY'
-import re, sys
-path, new_id = sys.argv[1], sys.argv[2]
-src = open(path).read()
-src2 = re.sub(r'(\[\[hyperdrive\]\][^\[]*id = ")[a-f0-9]+(")', r'\g<1>' + new_id + r'\g<2>', src, count=1)
-if src2 != src:
-    open(path, "w").write(src2)
-    print("updated")
-else:
-    print("unchanged")
-PY
-)" "$WORKER_DIR/wrangler.toml" "$hd_id"
-}
-
 # --- deploy the Worker -----------------------------------------------------------------
 
 do_deploy() {
@@ -305,6 +193,9 @@ do_deploy() {
     # works with no local `trigger dev` process running.
     (cd "$WORKER_DIR" && printf '%s' "$TRIGGER_SECRET_KEY_PROD" | wrangler secret put TRIGGER_SECRET_KEY)
     (cd "$WORKER_DIR" && printf '%s' "$CLICKHOUSE_SITE_PASSWORD" | wrangler secret put CLICKHOUSE_SITE_PASSWORD)
+    # The write credential (ADR-005). Scoped to INSERT/SELECT on app.saved_sites — never the
+    # `default` password, which would put an admin credential in a Worker.
+    (cd "$WORKER_DIR" && printf '%s' "$CLICKHOUSE_APP_WRITER_PASSWORD" | wrangler secret put CLICKHOUSE_APP_WRITER_PASSWORD)
     ok "$WORKER_NAME deployed with secrets set"
 }
 
@@ -315,8 +206,8 @@ do_deploy() {
 # during development — resolves within ~10s). Retry a handful of times before treating it
 # as a real failure.
 curl_retry() {
-    local url="$1" method="${2:-GET}" data="${3:-}" i code
-    for i in 1 2 3 4 5; do
+    local url="$1" method="${2:-GET}" data="${3:-}" code
+    for _ in 1 2 3 4 5; do
         if [[ -n "$data" ]]; then
             code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X "$method" \
                 -H 'content-type: application/json' -d "$data" "$url")"
@@ -343,11 +234,24 @@ verify() {
     grep -q '"token"' <<<"$token_resp" || die "POST /api/token did not return a token: $token_resp"
     ok "token mint works"
 
-    log "GET /api/list-saved"
-    local list_code
-    list_code="$(curl_retry "https://$HOSTNAME_PUBLIC/api/list-saved")"
-    [[ "$list_code" == "200" ]] || die "GET /api/list-saved -> HTTP $list_code"
-    ok "postgres (via Hyperdrive) reachable from the Worker"
+    # The save path, for real: POST a canary row through the Worker, read it back as the
+    # PUBLIC `site` user (which is how the panel reads it — so this proves the grant too),
+    # then delete it. A 200 from the endpoint alone would not prove the row landed.
+    log "POST /api/save-site (canary round-trip)"
+    local canary save_resp found
+    canary="deploy-verify canary"
+    save_resp="$(curl -sS --max-time 20 -X POST "https://$HOSTNAME_PUBLIC/api/save-site" \
+        -H 'content-type: application/json' \
+        -d "{\"city\":\"berlin\",\"category\":\"deploy-verify\",\"label\":\"$canary\",\"lon\":13.4,\"lat\":52.5,\"h3_8\":\"881f1d4881fffff\",\"score\":null}")"
+    grep -q '"ok":true' <<<"$save_resp" || die "POST /api/save-site failed: $save_resp"
+
+    found="$(curl -sS --max-time 20 \
+        "$CLICKHOUSE_URL/?user=${CLICKHOUSE_SITE_USER}&password=$(python3 -c 'import urllib.parse,os;print(urllib.parse.quote(os.environ["CLICKHOUSE_SITE_PASSWORD"]))')" \
+        --data-binary "SELECT count() FROM app.saved_sites FINAL WHERE label = '$canary'")"
+    [[ "$found" == "1" ]] || die "canary row not readable as the site user (got '$found') — INSERT or GRANT broken"
+
+    ch "ALTER TABLE app.saved_sites DELETE WHERE label = '$canary'" >/dev/null
+    ok "saved-site write round-trip works (canary written, read back as 'site', deleted)"
 }
 
 # --- main --------------------------------------------------------------------------------
@@ -357,17 +261,15 @@ main() {
     case "${1:-}" in
         build) do_build ;;
         load) do_load ;;
-        provision) do_provision ;;
         deploy) do_deploy ;;
         verify) verify ;;
         "")
             do_build
             do_load
-            do_provision
             do_deploy
             verify
             ;;
-        *) die "unknown subcommand '$1' — build|load|provision|deploy|verify" ;;
+        *) die "unknown subcommand '$1' — build|load|deploy|verify" ;;
     esac
 }
 

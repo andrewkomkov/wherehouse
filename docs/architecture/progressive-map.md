@@ -6,7 +6,7 @@
 > **What is proven vs assumed** (constitution II)
 >
 > **Proven** — in-place reconciliation, the load-bearing claim below. The skeleton's tool
-> writes `id="map"` once per row, 1.5 s apart, with two real `oltp.pg_saved_sites` rows
+> writes `id="map"` once per row, 1.5 s apart, with two real saved-site rows
 > ~4 km apart in Berlin. Recorded in the browser:
 >
 > ```

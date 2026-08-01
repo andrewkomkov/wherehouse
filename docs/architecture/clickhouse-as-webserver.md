@@ -5,7 +5,7 @@ app (not a demo page), static-exported, loaded row-by-row into `web.assets`, ser
 Cloudflare Worker in `infra/app-worker/` (option C, revised — see below). Verified live:
 page loads with zero external requests (fonts self-hosted), a full chat run assembles
 (competitor dots, opportunity choropleth, ranked picks, caption) against live ClickHouse +
-Trigger.dev, and a save-site write round-trips through Hyperdrive into Postgres and back
+Trigger.dev, and a save-site write round-trips through the Worker into ClickHouse and back
 into the UI. Rebuild/redeploy: `./infra/deploy-app.sh`.
 **Date:** 2026-07-17 (decided) / 2026-07-18 (built)
 
@@ -14,21 +14,26 @@ into the UI. Rebuild/redeploy: `./infra/deploy-app.sh`.
 The section below ("Options for the delivery shape") leaned **A** (Cloud-only, browser
 queries ClickHouse directly for the page too) with a Worker "purely for a pretty hostname".
 What actually got built is closer to **C**: the Worker is not a thin rewrite — it holds
-`TRIGGER_SECRET_KEY` and the Postgres connection as secrets and serves three `/api/*`
+`TRIGGER_SECRET_KEY` and a ClickHouse write credential as secrets and serves three `/api/*`
 routes, because the static export has **no server runtime at all** (no Server Actions, no
 API routes), and three operations still need a secret held server-side: minting a
-Trigger.dev public token, starting a `chat.agent` session, and the OLTP save/list. All
+Trigger.dev public token, starting a `chat.agent` session, and writing a saved site. All
 three were proven to run in workerd *before* anything else was built (constitution III):
 
 - Token mint + session start are pure `fetch` + local HS256 JWT signing (`jose`,
   WebCrypto) — verified against the live Trigger.dev API from both `wrangler dev` and a
   real deployed Worker.
-- Postgres needs **Hyperdrive**, not raw `cloudflare:sockets`: a plain TCP socket
-  completes the Postgres SSLRequest handshake fine, but Cloudflare's `startTls()` only
-  trusts public root CAs, with no custom-CA option — and our managed Postgres presents a
-  private, Ubicloud-issued CA (same root cause as the documented `psql sslmode=require`
-  failure elsewhere in this doc). Hyperdrive supports a custom CA
-  (`--ca-certificate-id`) and was verified end-to-end on a real deployed Worker.
+- The saved-site write is one HTTPS POST to ClickHouse as the narrow `app_writer` user
+  ([ADR-005](saved-sites-in-clickhouse.md)) — ordinary `fetch` against a public-CA endpoint,
+  nothing special about workerd required.
+
+  It was not always this easy. Until 2026-08-01 saved sites lived in a managed Postgres, and
+  reaching it needed **Hyperdrive**, not raw `cloudflare:sockets`: a plain TCP socket completes
+  the Postgres SSLRequest handshake fine, but Cloudflare's `startTls()` only trusts public root
+  CAs, with no custom-CA option — and that server presented a private, Ubicloud-issued CA (same
+  root cause as the documented `psql sslmode=require` failure elsewhere in this doc). Hyperdrive
+  supports a custom CA (`--ca-certificate-id`) and was verified end-to-end on a real deployed
+  Worker. Retiring Postgres retired that whole apparatus.
 
 The claim "every byte the browser gets for the page originates in a ClickHouse row" still
 holds — `web.assets` (`db/clickhouse/009_app_assets_schema.sql`) holds the whole static

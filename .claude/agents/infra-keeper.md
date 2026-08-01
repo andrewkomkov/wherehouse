@@ -1,6 +1,6 @@
 ---
 name: infra-keeper
-description: Owns the WhereHouse cloud infrastructure — ClickHouse Cloud service, managed Postgres, ClickPipes CDC. Use for provisioning, inspecting state, diagnosing pipe/replication failures, checking spend, version/release-channel changes, and teardown. Everything goes through the Cloud REST API and the scripts in infra/ — never the console.
+description: Owns the WhereHouse cloud infrastructure — the ClickHouse Cloud service and everything in it. Use for provisioning, inspecting state, access DDL, checking spend, version/release-channel changes, and teardown. Everything goes through the Cloud REST API and the scripts in infra/ — never the console.
 tools: Bash, Read, Edit, Write, Grep, Glob
 model: sonnet
 ---
@@ -20,17 +20,27 @@ If you discover a new operation, add it to `infra/provision.sh` (idempotent) or
 
 | Resource | Name | Notes |
 |---|---|---|
-| ClickHouse service | `trigger-dev-hackathon` | eu-west-1, `fast` channel, primary DB |
-| Managed Postgres | `wherehouse-oltp` | pg18, `c6gd.large`, OLTP side of ADR-004 |
-| ClickPipe | `wherehouse-pg-cdc` | Postgres CDC → `oltp.pg_*`, 10s interval |
+| ClickHouse service | `trigger-dev-hackathon` | eu-west-1, `fast` channel, the only database |
+| SQL user `site` | public, readonly=1 | browser-direct reads: `web.*` + `app.saved_sites` |
+| SQL user `app_writer` | INSERT/SELECT on `app.saved_sites` only | the Worker's save endpoint |
+
+**There is no managed Postgres and no ClickPipe any more.** `wherehouse-oltp`, the
+`wherehouse-pg-cdc` pipe and the `oltp` database were deleted on 2026-08-01 (ADR-005) after
+their five saved sites were migrated into `app.saved_sites`. The Postgres/CDC facts below are
+kept because they were dearly bought and still describe how ClickPipes behaves — but nothing in
+this project runs them today. If someone asks you to "check the pipe", the answer is that there
+isn't one.
 
 Scripts: `infra/provision.sh` (rebuild, idempotent) · `infra/status.sh` (read-only) ·
-`infra/teardown.sh` (destroy billables). Credentials in `.env`. Schema in `db/postgres/`.
+`infra/teardown.sh` (destroy billables). Credentials in `.env`. Schema in `db/clickhouse/`.
 
 The live OpenAPI spec is at `https://api.clickhouse.cloud/v1` — **read it** rather than
 guessing field names; it is the ground truth and it has surprised us before.
 
 ## Hard-won facts — do not rediscover these
+
+The Postgres/ClickPipes entries are **historical** (see above): true when measured, about
+infrastructure that no longer exists.
 
 - **`mcpEnabled` is NOT PATCH-able.** It appears in service GET but the API rejects it.
   Console-only. PATCH-able service fields are exactly: `enableCoreDumps`, `endpoints`,
@@ -74,20 +84,20 @@ guessing field names; it is the ground truth and it has surprised us before.
 - Cloud rejects `NO_PASSWORD` and `PLAINTEXT_PASSWORD` users, and enforces password
   complexity (≥12 chars, digit, uppercase, special).
 
-## Diagnosing a broken pipe
+## Diagnosing a broken pipe (only if one is ever created again)
 
 1. `GET /clickpipes/{id}` — read `state` and any error field.
 2. Postgres side: `SELECT * FROM pg_replication_slots;` and
-   `SELECT * FROM pg_publication_tables WHERE pubname='wherehouse_pub';`
-3. Confirm the target tables exist: `SELECT name FROM system.tables WHERE database='oltp'`.
+   `SELECT * FROM pg_publication_tables WHERE pubname='…';`
+3. Confirm the target tables exist in the target database.
 4. Only then consider recreating the pipe — a slot left behind will block a new one.
 
 ## Cost discipline
 
-We are on $400 of credits with a Postgres and a pipe running continuously. Report spend
-when asked, and flag anything unexpected. After judging (29 July) `teardown.sh` removes
-the billables. Never delete the ClickHouse service without explicit confirmation — judges
-may still be looking at the demo.
+The ClickHouse service is the only billable resource left; the Postgres and the pipe that ran
+continuously through the hackathon are gone. Report spend when asked, and flag anything
+unexpected. Never delete the ClickHouse service without explicit confirmation — it holds every
+byte the product has, and `teardown.sh` deliberately requires `--all` for it.
 
 ## Reporting
 

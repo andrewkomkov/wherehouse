@@ -1,12 +1,10 @@
 /**
- * Shared, client-safe types for the OLTP-backed saved-site history.
+ * Shared, client-safe types for the saved-site history.
  *
- * Pulled out of `lib/pg.ts` on day 5: that module imports `pg` + `node:fs` (reads the
- * Postgres CA off disk) and must never enter the client bundle. `chat.tsx` used to import
- * `SavedSiteRow` from `@/lib/pg` as a type-only import, which is normally erased at compile
- * time — but with the static export (`output: "export"`) there is no server runtime at all
- * to fall back on if that erasure ever doesn't happen, so the type now lives here, with zero
- * dependencies, and both the client and the Worker's server-side code import from here.
+ * Pulled out of `lib/pg.ts` on day 5, when that module still imported `pg` + `node:fs` (it read
+ * the Postgres CA off disk) and had to be kept out of the client bundle. The module itself is
+ * gone with ADR-005 — saved sites live in ClickHouse now — but the type stays here, dependency
+ * free, shared by the client and the Worker.
  */
 /**
  * The p95 scalars ClickHouse used to normalise demand/supply/accessibility for one query.
@@ -21,8 +19,8 @@
 export type Scale = { popP95: number; supP95: number; accP95: number };
 
 export type SavedSiteRow = {
-  id: number;
-  shortlist_id: number;
+  /** UUID — ClickHouse has no sequences; see db/clickhouse/014_saved_sites.sql. */
+  id: string;
   label: string;
   lon: number;
   lat: number;

@@ -1,6 +1,6 @@
 # WhereHouse app worker (day 5 / ADR-003 "for real"): serves the static Next export out of
 # ClickHouse rows (`web.assets`) and fronts the three server-side operations the app needs
-# (Trigger.dev public-token mint, chat-session start, Postgres save/list) that used to be
+# (Trigger.dev public-token mint, chat-session start, saved-site write) that used to be
 # Next.js Server Actions — moved here because the static export has no server runtime.
 #
 # Don't deploy this by hand — `./infra/deploy-app.sh` owns the whole pipeline (build ->
@@ -17,15 +17,12 @@ compatibility_flags = ["nodejs_compat"]
 pattern = "app.slim-shaggy.com"
 custom_domain = true
 
-# Postgres access from Workers: raw TCP sockets (`cloudflare:sockets`) fail TLS
-# verification against our managed Postgres's Ubicloud-issued CA — Cloudflare's Sockets
-# API only trusts public root CAs, with no way to supply a custom one. Hyperdrive DOES
-# support a custom CA (`--ca-certificate-id`, uploaded via `wrangler cert upload
-# certificate-authority`) and is the verified fix — see infra/deploy-app.sh and the
-# provisioning notes in README.md.
-[[hyperdrive]]
-binding = "HYPERDRIVE"
-id = "6ba4c16dda464b0984f952f7d8bb93ba"
+# No Hyperdrive binding any more. It existed solely to reach the managed Postgres that held
+# saved sites — raw TCP sockets (`cloudflare:sockets`) could not validate that server's
+# Ubicloud-issued private CA, and Hyperdrive was the one Workers path that could
+# (`--ca-certificate-id`). ADR-005 moved saved sites into ClickHouse itself, which the Worker
+# reaches over plain HTTPS with a public CA, so the binding, the uploaded CA cert, the Postgres
+# instance and the CDC pipe all went away together.
 
 [vars]
 # ClickHouse Cloud (ADR-003). The existing public read-only `site` user (readonly=1,
@@ -36,6 +33,9 @@ id = "6ba4c16dda464b0984f952f7d8bb93ba"
 # file free of any credential value.
 CLICKHOUSE_URL = "https://i69bqvgz9q.eu-west-1.aws.clickhouse.cloud:8443"
 CLICKHOUSE_SITE_USER = "site"
+# The saved-site write path (ADR-005). This user can INSERT/SELECT `app.saved_sites` and
+# nothing else; its password is a Worker secret, set by ./infra/deploy-app.sh.
+CLICKHOUSE_APP_WRITER_USER = "app_writer"
 TRIGGER_TASK_ID = "wherehouse-chat"
 # Origins allowed to call /api/* cross-origin. Same-origin calls (the deployed page calling
 # its own domain) don't need this at all; it exists for `next dev` on localhost.

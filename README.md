@@ -77,10 +77,12 @@ and streamed straight to the browser.
 - **Real ClickHouse feature depth, where it earns its place:** a `Dictionary` +
   `dictGetFloat32` UDF for complementary-business affinity; an incremental
   `AggregatingMergeTree` **materialized view** (`category_momentum`) rolling OSM edit-history
-  into per-cell monthly momentum; `ReplacingMergeTree` + `FINAL` for CDC freshness.
-- **OLTP + OLAP in one join** (bonus prize): a user's saved site — seconds old, replicated
-  from managed Postgres by **ClickPipes CDC** — is re-scored against today's 75M-POI market.
-  ([ADR-004](docs/architecture/oltp-olap.md))
+  into per-cell monthly momentum; `ReplacingMergeTree` + `FINAL` for the saved-site store.
+- **Your own state, joined against the world:** a site you saved seconds ago is re-scored
+  against today's 75M-POI market on H3 equality. It lived in a ClickHouse-managed Postgres
+  replicated back by **ClickPipes CDC** for the hackathon's OLTP+OLAP prize
+  ([ADR-004](docs/architecture/oltp-olap.md)); it now lives in ClickHouse itself, and the join
+  is unchanged ([ADR-005](docs/architecture/saved-sites-in-clickhouse.md)).
 
 ### Trigger.dev `chat.agent()` orchestrates the whole answer
 
@@ -122,8 +124,9 @@ and streamed straight to the browser.
      • geo.population     (Kontur demand)
      • geo.isochrones     (Valhalla walk catchments, precomputed)
      • geo.districts      (Overture divisions → real place names)
-     • geo.affinity       (Dictionary UDF)         oltp.pg_* ◀── ClickPipes CDC ── Postgres
+     • geo.affinity       (Dictionary UDF)
      • geo.category_momentum (incremental MV)
+     • app.saved_sites    (your saved sites — the same DB, joined on H3)
 ```
 
 The first screen is a Claude/ChatGPT-style **omnibar**; on your first question it transitions
@@ -163,7 +166,7 @@ pnpm exec trigger dev         # the chat.agent() task, in a second terminal
 Provision the cloud from nothing (idempotent, all via the Cloud REST API):
 
 ```sh
-./infra/provision.sh          # ClickHouse service, managed Postgres, ClickPipes CDC
+./infra/provision.sh          # ClickHouse service + the app schema
 ./infra/deploy-app.sh         # build the static bundle → load into ClickHouse → deploy the Worker
 ./infra/deploy-trigger.sh     # ship the agent to Trigger.dev prod and wire the Worker to it
 ```
@@ -175,11 +178,11 @@ Provision the cloud from nothing (idempotent, all via the Cloud REST API):
 | Path | What |
 |---|---|
 | [`web/`](web) | Next.js app (static export). `src/trigger/` = the agent + SQL; `src/components/chat.tsx` = the whole UI |
-| [`infra/`](infra) | Everything provisioned as code — ClickHouse, Postgres, CDC, basemap, Valhalla, deploys |
-| [`db/`](db) | ClickHouse + Postgres schemas and loaders |
+| [`infra/`](infra) | Everything provisioned as code — ClickHouse, basemap, Valhalla, deploys |
+| [`db/`](db) | ClickHouse schemas and loaders |
 | [`video/`](video) | The demo video pipeline — scenario, voiceover script, Remotion + Playwright |
 | [`docs/PLAN.md`](docs/PLAN.md) | Day-by-day plan, what's cut, risk register |
-| [`docs/architecture/`](docs/architecture) | ADR-001…004 — read before changing direction |
+| [`docs/architecture/`](docs/architecture) | ADR-001…005 — read before changing direction |
 | [`.specify/memory/constitution.md`](.specify/memory/constitution.md) | Project constitution — verify against the live system, prove the riskiest path first |
 
 ---
@@ -188,7 +191,7 @@ Provision the cloud from nothing (idempotent, all via the Cloud REST API):
 
 - **The map is the response** — layers stream in place through `chat.agent()`, wave by wave.
 - **ClickHouse is the web server** — the app is a database row; the browser talks to the DB.
-- **OLTP × OLAP in one join** — a seconds-old saved site scored against 75M POIs, live.
+- **Your state × the world in one join** — a site saved seconds ago, scored against 75M POIs.
 - **Honesty as a feature** — absent data is shown as absent; unmeasured cells are labelled, not
   zero-filled; the agent is structurally unable to invent a place name.
 

@@ -453,11 +453,12 @@ function makeActions(page) {
       if (zoomed) await restoreCamera(page, cam, 1500);
     },
     // Same as focusTopPick, but ALSO saves the #1 pick first (a real `.wh-save` click, so it goes
-    // to Postgres via saveSiteAction — no agent round-trip needed). Used by cities that have no
+    // to ClickHouse via saveSiteAction — no agent round-trip needed). Used by cities that have no
     // pre-existing saved sites of their own, so a later "compare" beat (`compareSaved`) has a real
     // site for THIS city to re-score — the compare button only renders once `displaySavedSites`
-    // is non-empty. Saving first (before the "why the #1 pick?" ask) leaves the CDC replication
-    // (~10s) the most possible headroom before the compare beat runs.
+    // is non-empty. Saving first (before the "why the #1 pick?" ask) used to also buy headroom for
+    // the ~10 s CDC replication; the write lands in ClickHouse directly now (ADR-005), so the
+    // ordering is only about the beat sheet reading naturally.
     focusTopPickAndSave: async (b) => {
       // Short timeouts on both clicks: if the pick is ALREADY saved (e.g. a re-shoot after a prior
       // take saved it), the save button sits in its "saved" state and is not actionable — the

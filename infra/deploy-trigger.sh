@@ -19,13 +19,13 @@
 # 1. `trigger deploy` INDEXES every task file in a remote build container as part of the
 #    build (an "indexer" step, not just static bundling) — so any `process.env.X` read that
 #    happens eagerly at module load, not inside a task run, executes there too. Deploy #1
-#    failed with "Postgres CA not found at .secrets/pg-ca.crt" from `web/src/lib/pg.ts`:
-#    that module builds its Postgres `Pool` (and reads the CA file) at import time,
-#    unconditionally — meaning *every* chat message, not just `saveSite`, would have
-#    crashed the deployed task before this was caught. Fixed in `lib/pg.ts`: it now prefers
-#    `POSTGRES_CA_CERT` (an env var, set below) over the local file, file read stays as the
-#    local-dev fallback. Order matters: env vars must be imported (`env`) *before*
-#    `deploy`, since the indexer step reads the current prod environment.
+#    failed with "Postgres CA not found at .secrets/pg-ca.crt" from the old
+#    `web/src/lib/pg.ts`: that module built its Postgres `Pool` (and read the CA file) at
+#    import time, unconditionally — meaning *every* chat message, not just `saveSite`, would
+#    have crashed the deployed task before this was caught. That module is gone with ADR-005
+#    (saved sites live in ClickHouse), but the lesson stands for anything added later: no
+#    eager env/file reads at module scope. Order also matters — env vars must be imported
+#    (`env`) *before* `deploy`, since the indexer step reads the current prod environment.
 #
 # 2. There is no `trigger env set` in the CLI (only list/get/pull) and no CLI subcommand to
 #    fetch a project's prod secret key. Both go through the REST API
@@ -67,11 +67,9 @@ load_env
 : "${CLICKHOUSE_URL:?missing in .env}"
 : "${CLICKHOUSE_USER:?missing in .env}"
 : "${CLICKHOUSE_PASSWORD:?missing in .env}"
-: "${POSTGRES_URL:?missing in .env}"
 
 WEB_DIR="$ROOT/web"
 WORKER_DIR="$ROOT/infra/app-worker"
-CA_FILE="$ROOT/.secrets/pg-ca.crt"
 TRIGGER_API="https://api.trigger.dev"
 
 need() { command -v "$1" >/dev/null 2>&1 || die "missing '$1' — $2"; }
@@ -81,7 +79,6 @@ preflight() {
     need python3 "should be on macOS/Linux by default"
     (cd "$WEB_DIR" && pnpm exec trigger whoami >/dev/null 2>&1) \
         || die "trigger CLI not authenticated — run 'cd web && pnpm exec trigger login'"
-    [[ -f "$CA_FILE" ]] || die "no $CA_FILE — fetch it per CLAUDE.md's Postgres section first"
 }
 
 # The personal access token `trigger login` already stored, for the two REST calls the CLI
@@ -106,15 +103,13 @@ trigger_pat() {
 # --- env: import the vars the deployed task reads at runtime -----------------------------
 
 # Grep-derived, not hand-maintained: every `process.env.X` the task (and its imports)
-# actually reads. Re-check this list if chat.ts / layers.ts / scoring.ts / lib/pg.ts grow
-# new env reads.
+# actually reads. Re-check this list if chat.ts / layers.ts / scoring.ts grow new env reads.
 do_env() {
     log "importing required vars into the Trigger prod environment"
     local pat
     pat="$(trigger_pat)"
     [[ -n "$pat" ]] || die "could not read the trigger CLI's stored PAT"
 
-    CA_CONTENT="$(cat "$CA_FILE")" \
     python3 - "$pat" "$TRIGGER_PROJECT_ID" "$TRIGGER_API" <<'PY'
 import json, os, sys, urllib.request
 
@@ -127,8 +122,6 @@ variables = {
     "CLICKHOUSE_URL": os.environ["CLICKHOUSE_URL"],
     "CLICKHOUSE_USER": os.environ["CLICKHOUSE_USER"],
     "CLICKHOUSE_PASSWORD": os.environ["CLICKHOUSE_PASSWORD"],
-    "POSTGRES_URL": os.environ["POSTGRES_URL"],
-    "POSTGRES_CA_CERT": os.environ["CA_CONTENT"],
 }
 body = json.dumps({"variables": variables, "override": True, "isSecret": True}).encode()
 req = urllib.request.Request(

@@ -38,13 +38,14 @@ esac
 [ -f "voiceover/out/$VODIR/close.wav" ] || die "no VO for $CITY (voiceover/out/$VODIR) — run generate.py first"
 [ -f "voiceover/out/$VOMAN" ] || die "no VO manifest voiceover/out/$VOMAN — run generate.py first"
 
-# --- .env (POSTGRES_URL for saved-sites hygiene) ------------------------------------------------
+# --- .env (ClickHouse creds for saved-sites hygiene) --------------------------------------------
 envfile="$ROOT/../.env"
 # shellcheck disable=SC1090
 [ -f "$envfile" ] && { set -a; . "$envfile"; set +a; } || die "no .env"
-export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
-CA="$ROOT/../.secrets/pg-ca.crt"
-psql_do() { psql "${POSTGRES_URL}&sslmode=verify-full&sslrootcert=${CA}" -v ON_ERROR_STOP=1 "$@"; }
+# Saved sites live in ClickHouse (ADR-005); this used to psql into a managed Postgres and then
+# wait out CDC. `default`, not `app_writer` — a DELETE is a mutation, which the writer cannot do.
+ch_do() { curl -sS --fail-with-body --max-time 60 --user "default:$CLICKHOUSE_PASSWORD" \
+              "$CLICKHOUSE_URL/" --data-binary "$1"; }
 
 render="out/render-${CITY}.mp4"   # saved silent render, so a VO-only tweak can re-mix for free
 
@@ -60,12 +61,19 @@ else
   # creates their save live during the capture, so they start from empty.
   log "saved-sites hygiene for $CITY"
   if [ "$CITY" = "berlin" ]; then
-    psql_do -c "DELETE FROM public.saved_sites WHERE user_id='u1' AND label IN ('Rakovica','Nieuw-West, Amsterdam')"
+    ch_do "ALTER TABLE app.saved_sites DELETE WHERE user_id='u1' AND label IN ('Rakovica','Nieuw-West, Amsterdam')"
   else
-    psql_do -c "DELETE FROM public.saved_sites WHERE user_id='u1'"
+    ch_do "ALTER TABLE app.saved_sites DELETE WHERE user_id='u1'"
   fi
-  log "waiting 15s for ClickPipes CDC to carry that to ClickHouse before the compare beat re-scores…"
-  sleep 15
+  # A ClickHouse DELETE is an async mutation, so this still needs a wait — but for the mutation to
+  # finish, not for CDC to carry the change across. Block on the mutation rather than guessing.
+  log "waiting for the delete mutation to finish…"
+  for _ in $(seq 1 30); do
+    pending="$(ch_do "SELECT count() FROM system.mutations WHERE database='app' AND table='saved_sites' AND is_done=0")"
+    if [ "$pending" = "0" ]; then break; fi
+    sleep 2
+  done
+  [ "${pending:-0}" = "0" ] || die "saved-sites delete mutation did not finish — the compare beat would re-score stale rows"
 
   # --- 2. stage the city's beat sheet as the active beats.json (build.sh reads beats.json) -------
   cp "$BEATS" beats.json

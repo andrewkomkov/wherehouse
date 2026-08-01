@@ -5,7 +5,6 @@ import type { InferUITools, UIMessage } from "ai";
 import { createClient } from "@clickhouse/client";
 import { z } from "zod";
 import { emitLayer, type MapData, type BBox, type LayerId } from "./layers";
-import { upsertShortlist, insertSavedSite } from "../lib/pg";
 import {
   CITIES,
   isCity,
@@ -654,28 +653,58 @@ const showCatchment = tool({
 });
 
 // The user is `u1` everywhere in this demo — there is no auth yet, and the write side
-// (db/postgres/001_oltp_schema.sql) keys sites on it. One place so it cannot drift.
+// (db/clickhouse/014_saved_sites.sql) keys sites on it. One place so it cannot drift.
 const DEMO_USER_ID = "u1";
 
 /**
- * The fixed chat scope every shortlist is keyed on — BOTH save paths, deliberately.
+ * Persist one saved site — the agent half of the write path (ADR-005).
  *
- * A shortlist is keyed on (chat_id, user_id, city, business_type). The two save paths must agree on
- * chat_id or the same (user, city, trade) splits across two shortlist rows (there is no unique
- * constraint to catch it): the agent tool below and the Worker's `handleSaveSite`
- * (infra/app-worker/src/postgres.ts) — the map-click save — must both use THIS constant. If the
- * Worker keyed on the browser session's real chatId (as it once did) while the agent tool used this
- * scope, a click-save and an agent-save for one trade would land under different shortlists.
+ * Straight into `app.saved_sites` with the run's existing `default` client, the same one that
+ * already writes `web.layers` (trigger/layers.ts). The Worker's `/api/save-site` — the map-click
+ * save — writes the SAME row shape through the narrow `app_writer` user, because a Cloudflare
+ * Worker must not hold the `default` password; see infra/app-worker/src/saved-sites.ts.
  *
- * Using a constant is also the only thing that actually works for the agent tool: `ai.chatContext()`
- * populates chatId only for a tool run as a subtask (`ai.toolExecute`), and these tools run INLINE
- * in the agent run, so it returns undefined regardless. The visible effect is that every save for
- * one (user, city, business_type) lands under ONE shortlist regardless of conversation — the right
- * behaviour for a single-user demo, wrong for multi-tenant. A real product would thread a real
- * chatId through BOTH paths together. (constitution II — stated as the limitation it is, not dressed
- * up as per-chat isolation we did not build.)
+ * `id` is omitted: the column DEFAULTs to `generateUUIDv4()` and the agent has no use for it.
+ *
+ * There is no chat scoping. A saved site is keyed on (user_id, city, business_type) and nothing
+ * else, so every save for one trade in one city lands in one list regardless of conversation —
+ * the right behaviour for a single-user demo, wrong for multi-tenant. (This used to need a
+ * shared `SAVE_CHAT_SCOPE` constant across both save paths to stop a shortlist row splitting in
+ * two; with the shortlist table gone there is nothing left to split.) A real product would thread
+ * a real chatId through both paths together — and `ai.chatContext()` would not supply it here
+ * anyway: it populates chatId only for a tool run as a subtask (`ai.toolExecute`), and these tools
+ * run INLINE in the agent run. Stated as the limitation it is, not dressed up as per-chat
+ * isolation we did not build (constitution II).
  */
-const SAVE_CHAT_SCOPE = "wherehouse-demo";
+async function insertSavedSite(input: {
+  userId: string;
+  city: string;
+  businessType: string;
+  label: string;
+  lon: number;
+  lat: number;
+  h3_8: string;
+  score?: number | null;
+}): Promise<void> {
+  await clickhouse.insert({
+    table: "app.saved_sites",
+    format: "JSONEachRow",
+    values: [
+      {
+        user_id: input.userId,
+        city: input.city,
+        business_type: input.businessType,
+        label: input.label,
+        lon: input.lon,
+        lat: input.lat,
+        h3_8: input.h3_8,
+        // absent != 0: an unscored save must land as NULL, not 0 — the panel renders "unscored".
+        score: input.score ?? null,
+        status: "candidate",
+      },
+    ],
+  });
+}
 
 const saveSite = tool({
   description:
@@ -708,19 +737,13 @@ const saveSite = tool({
     }
 
     const label = placeName(pick) ?? "saved site";
-    // The fixed scope, NOT the run's chatId — see SAVE_CHAT_SCOPE. This is the same key the Worker's
-    // handleSaveSite uses, so an agent save and a map-click save for one (user, city, trade) share
-    // one shortlist instead of spawning two.
-    const shortlistId = await upsertShortlist({
-      chatId: SAVE_CHAT_SCOPE,
+    // `category` — the trade word the user typed — is what gets persisted, NOT the resolved
+    // Overture taxonomy: it is the same string compareSavedSites matches on, and the same one the
+    // Worker's map-click save writes.
+    await insertSavedSite({
       userId: DEMO_USER_ID,
       city: c.city,
       businessType: category,
-      title: `${category} in ${c.city}`,
-    });
-    await insertSavedSite({
-      shortlistId,
-      userId: DEMO_USER_ID,
       label,
       lon: pick.lon,
       lat: pick.lat,
